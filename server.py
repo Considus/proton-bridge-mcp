@@ -84,6 +84,11 @@ SMTP_PORT = int(_cfg("PROTON_SMTP_PORT", "1025"))
 KEYCHAIN_SVC = _cfg("PROTON_KEYCHAIN_SVC", "proton-bridge-imap")
 SMTP_USER = _cfg("PROTON_SMTP_USER") or USER
 SMTP_KEYCHAIN_SVC = _cfg("PROTON_SMTP_KEYCHAIN_SVC", "proton-bridge-smtp")
+AUDIT_LOG = _cfg("PROTON_AUDIT_LOG") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "audit.log")
+AUDIT_ENABLED = _cfg("PROTON_AUDIT", "1").lower() not in ("0", "false", "no", "off")
+AUDIT_MAX_BYTES = int(_cfg("PROTON_AUDIT_MAX_MB", "5")) * 1024 * 1024
+MAX_BULK = int(_cfg("PROTON_MAX_BULK", "50"))
 ATTACH_DIR = _cfg("PROTON_ATTACH_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "attachments")
 
@@ -173,6 +178,50 @@ def _sender_domain(address):
     if "@" in (address or ""):
         return address.rsplit("@", 1)[1].strip().strip(">")
     return "localhost"
+
+
+# ----------------------------------------------------------------------------
+# Audit log
+#
+# Every action that changes something is appended here as one JSON line. Message
+# bodies are never written, only their length, so the log records what happened
+# without becoming a second copy of the mailbox.
+# ----------------------------------------------------------------------------
+_AUDIT_REDACT = ("body", "note")
+
+
+def _rotate_audit():
+    try:
+        if os.path.getsize(AUDIT_LOG) > AUDIT_MAX_BYTES:
+            os.replace(AUDIT_LOG, AUDIT_LOG + ".1")
+    except OSError:
+        pass
+
+
+def _audit(tool, args, outcome, detail=""):
+    """Never raises. A failure to log must not break the operation."""
+    if not AUDIT_ENABLED:
+        return
+    try:
+        safe = {}
+        for k, v in (args or {}).items():
+            if k in _AUDIT_REDACT:
+                if v:
+                    safe[k] = "<%d chars, not logged>" % len(str(v))
+                continue
+            if isinstance(v, str) and len(v) > 200:
+                v = v[:200] + "..."
+            safe[k] = v
+        record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": tool,
+                  "outcome": outcome, "args": safe}
+        if detail:
+            record["detail"] = str(detail)[:300]
+        _rotate_audit()
+        fd = os.open(AUDIT_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception:
+        pass
 
 
 class ToolError(Exception):
@@ -1164,6 +1213,110 @@ def tool_purge_attachments(args):
             "Files under persist/ were kept." % (n, os.path.realpath(ATTACH_DIR)))
 
 
+def _parse_uids(args):
+    """Explicit numeric uids only. No wildcards and no 'everything in the
+    folder', so a bulk call can never be broader than what was asked for."""
+    uids = args.get("uids")
+    if isinstance(uids, str):
+        uids = [u for u in re.split(r"[,\s]+", uids) if u]
+    if not isinstance(uids, list) or not uids:
+        raise ToolError("'uids' must be a non-empty list of message uids.")
+    uids = [str(u).strip() for u in uids]
+    bad = [u for u in uids if not u.isdigit()]
+    if bad:
+        raise ToolError("These are not valid uids: %s" % ", ".join(bad[:5]))
+    if len(uids) > MAX_BULK:
+        raise ToolError("%d uids exceeds the %d-per-call limit. Split the batch, "
+                        "or raise PROTON_MAX_BULK." % (len(uids), MAX_BULK))
+    seen, out = set(), []
+    for u in uids:
+        if u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _bulk(args, verb, apply_one, readonly=False):
+    """Shared bulk driver. One connection for the whole batch instead of one
+    per message, and one failure doesn't abandon the rest."""
+    folder = args.get("folder", "INBOX")
+    uids = _parse_uids(args)
+    if args.get("dry_run"):
+        return ("DRY RUN, nothing changed. Would %s %d message(s) in '%s':\n  %s"
+                % (verb, len(uids), folder, ", ".join(uids)))
+    conn = imap_connect()
+    done, failed = [], []
+    try:
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=readonly)
+        for uid in uids:
+            try:
+                apply_one(conn, uid)
+                done.append(uid)
+            except Exception as e:
+                failed.append("%s (%s)" % (uid, e))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    out = "%s %d of %d message(s) in '%s'." % (
+        verb.capitalize(), len(done), len(uids), folder)
+    if done:
+        out += "\n  done: %s" % ", ".join(done)
+    if failed:
+        out += "\n  failed: %s" % "; ".join(failed)
+    return out
+
+
+def tool_bulk_mark(args):
+    action = args["action"]
+    mapping = {"read": ("+FLAGS", r"(\Seen)"), "unread": ("-FLAGS", r"(\Seen)"),
+               "star": ("+FLAGS", r"(\Flagged)"), "unstar": ("-FLAGS", r"(\Flagged)")}
+    if action not in mapping:
+        raise ToolError("action must be one of: read, unread, star, unstar")
+    op, flag = mapping[action]
+
+    def one(conn, uid):
+        typ, resp = conn.uid("STORE", uid, op, flag)
+        if typ != "OK":
+            raise RuntimeError(resp)
+    return _bulk(args, "mark as %s" % action, one)
+
+
+def tool_bulk_apply_label(args):
+    label = args["label"]
+    target = label if label.startswith("Labels/") else "Labels/%s" % label
+
+    def one(conn, uid):
+        typ, resp = conn.uid("COPY", uid, _folder_quote(target))
+        if typ != "OK":
+            raise RuntimeError("label does not exist?")
+    return _bulk(args, "label '%s'" % target, one)
+
+
+def tool_bulk_move(args):
+    """Gated: relocating a batch (Trash included) is the highest-blast-radius
+    thing here. Marking and labelling are trivially reversible, this isn't."""
+    if not args.get("confirmed"):
+        raise ToolError("Refusing a bulk move without confirmed=true. Show the "
+                        "user the uids and destination, or call with dry_run=true "
+                        "first, then confirm.")
+    dest = args["to_folder"]
+
+    def one(conn, uid):
+        try:
+            typ, resp = conn.uid("MOVE", uid, _folder_quote(dest))
+        except imaplib.IMAP4.error:
+            typ = "NO"
+        if typ != "OK":
+            typ, resp = conn.uid("COPY", uid, _folder_quote(dest))
+            if typ != "OK":
+                raise RuntimeError("copy failed")
+            conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+            conn.expunge()
+    return _bulk(args, "move to '%s'" % dest, one)
+
+
 def tool_folder_status(args):
     """Counts plus the UIDVALIDITY that every uid in this folder depends on."""
     folder = args.get("folder", "INBOX")
@@ -1358,6 +1511,58 @@ TOOLS = [
         "handler": tool_find_thread,
     },
     {
+        "name": "bulk_mark",
+        "description": "Mark many messages read/unread/starred in one pass. "
+                       "Far cheaper than one call per message.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
+                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
+                "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
+            },
+            "required": ["uids", "action"],
+        },
+        "handler": tool_bulk_mark,
+    },
+    {
+        "name": "bulk_apply_label",
+        "description": "Apply one existing label to many messages. Messages stay "
+                       "where they are.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
+                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
+                "label": {"type": "string", "description": "Existing label name."},
+            },
+            "required": ["uids", "label"],
+        },
+        "handler": tool_bulk_apply_label,
+    },
+    {
+        "name": "bulk_move",
+        "description": "File or Trash many messages at once. GATED: preview with "
+                       "dry_run=true, show the user, then call with confirmed=true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
+                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
+                "to_folder": {"type": "string"},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["uids", "to_folder", "confirmed"],
+        },
+        "handler": tool_bulk_move,
+    },
+    {
         "name": "create_draft",
         "description": "Write a draft into the Proton Drafts folder. Never "
                        "sends. For a reply, pass in_reply_to (the original "
@@ -1483,7 +1688,8 @@ TOOLS = [
 ]
 
 _MUTATING = {"send", "forward", "create_draft", "create_mailbox",
-             "move_to_folder", "apply_label", "mark", "save_attachment"}
+             "move_to_folder", "apply_label", "mark", "save_attachment",
+             "bulk_mark", "bulk_apply_label", "bulk_move"}
 if READONLY:
     # Absolute guarantee: a tool that isn't registered cannot be invoked,
     # no matter what an injected instruction asks for.
@@ -1538,13 +1744,22 @@ def handle(req):
         if handler is None:
             _error(id_, -32602, "Unknown tool: %s" % name)
             return
+        # Auditing lives here rather than in each handler, so a mutating tool
+        # added later cannot forget to log.
+        audited = name in _MUTATING
         try:
             text = handler(args)
+            if audited:
+                _audit(name, args, "ok", text.splitlines()[0] if text else "")
             _result(id_, {"content": [{"type": "text", "text": text}]})
         except ToolError as e:
+            if audited:
+                _audit(name, args, "refused", str(e).splitlines()[0])
             _result(id_, {"content": [{"type": "text", "text": "Error: %s" % e}],
                           "isError": True})
         except Exception as e:
+            if audited:
+                _audit(name, args, "error", str(e))
             _result(id_, {"content": [{"type": "text",
                           "text": "Unexpected error in %s: %s" % (name, e)}],
                           "isError": True})
