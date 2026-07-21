@@ -1,4 +1,4 @@
-# ProtonMail MCP
+# Proton Bridge MCP
 
 Give any AI assistant read, organise and carefully-gated send access to your Proton Mail, without handing your mail to anyone.
 
@@ -96,8 +96,8 @@ You'll also need Python 3.9 or newer. PDF text extraction wants `pypdf`, and the
 ## Install
 
 ```bash
-git clone https://github.com/Considus/ProtonMail-MCP.git
-cd ProtonMail-MCP
+git clone https://github.com/Considus/proton-bridge-mcp.git
+cd proton-bridge-mcp
 uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python pypdf
 python3 setup.py
 ```
@@ -113,7 +113,7 @@ Run it again any time. It notices you've set it up before, fills in what it alre
 If the commands above aren't your thing, paste this into any AI assistant that can run shell commands, then read what it proposes before you let it run.
 
 ```
-Please install the ProtonMail MCP server from https://github.com/Considus/ProtonMail-MCP
+Please install the Proton Bridge MCP server from https://github.com/Considus/proton-bridge-mcp
 on this computer. Clone it somewhere sensible, create a virtual environment with pypdf
 installed, then run setup.py and tell me the local link it prints so I can finish setup
 in my browser. Show me each command before you run it.
