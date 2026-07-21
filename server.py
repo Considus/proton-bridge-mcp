@@ -507,6 +507,161 @@ def tool_search_mail(args):
             pass
 
 
+def _sort_key(env):
+    try:
+        return email.utils.parsedate_to_datetime(env["date"]).timestamp()
+    except Exception:
+        return 0.0
+
+
+def tool_search_all_mail(args):
+    """Search every selectable mailbox and collapse duplicates.
+
+    In Proton a message lives in one folder but also appears under each label
+    and again in All Mail, so a naive sweep returns the same mail several times.
+    Results are keyed on Message-ID, All Mail is scanned last as a safety net
+    rather than a source, and every hit carries its folder's UIDVALIDITY so the
+    uids are actually safe to act on."""
+    limit = int(args.get("limit", 25))
+    crit = _build_search(args)
+    conn = imap_connect()
+    try:
+        boxes = [n for f, n in _list_mailboxes(conn) if "noselect" not in f]
+        try:
+            allbox = _special_folder(conn, "all")
+        except ToolError:
+            allbox = None
+        ordered = [n for n in boxes if n != allbox] + ([allbox] if allbox else [])
+
+        found, scanned = {}, 0
+        for name in ordered:
+            typ, _ = conn.select(_folder_quote(name), readonly=True)
+            if typ != "OK":
+                continue
+            scanned += 1
+            validity = _uidvalidity(conn)
+            typ, data = conn.uid("SEARCH", None, *crit)
+            if typ != "OK":
+                continue
+            uids = (data[0].split() if data and data[0] else [])[::-1][:limit * 2]
+            for u in uids:
+                typ, md = conn.uid("FETCH", u, "(BODY.PEEK[HEADER.FIELDS "
+                                               "(FROM SUBJECT DATE MESSAGE-ID)])")
+                if typ != "OK" or not md or md[0] is None:
+                    continue
+                env = _parse_envelope(md[0][1])
+                key = env["message_id"] or "%s:%s" % (name, u.decode())
+                if key in found:
+                    found[key]["also"].append(name)
+                    continue
+                found[key] = {"folder": name, "uid": u.decode(),
+                              "validity": validity, "env": env, "also": []}
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+    hits = sorted(found.values(), key=lambda r: _sort_key(r["env"]), reverse=True)
+    total = len(hits)
+    rows = []
+    for r in hits[:limit]:
+        env = r["env"]
+        extra = ("\n    also in: %s" % ", ".join(sorted(set(r["also"]))[:6])) if r["also"] else ""
+        rows.append("[%s uid %s, uidvalidity %s] %s\n    from: %s\n    date: %s%s"
+                    % (r["folder"], r["uid"], r["validity"] or "unknown",
+                       env["subject"] or "(no subject)", env["from"], env["date"], extra))
+    if not rows:
+        return "No messages matched across %d mailbox(es)." % scanned
+    shown = "showing the %d most recent" % len(rows) if total > len(rows) else "all shown"
+    return ("%d distinct message(s) across %d mailbox(es), %s:\n\n%s"
+            % (total, scanned, shown, "\n\n".join(rows)))
+
+
+_AUTH_RE = re.compile(r"\b(spf|dkim|dmarc|arc)\s*=\s*(\w+)", re.I)
+
+
+def _auth_verdicts(msg):
+    verdicts = {}
+    for line in msg.get_all("Authentication-Results") or []:
+        for mech, result in _AUTH_RE.findall(line):
+            verdicts.setdefault(mech.lower(), result.lower())
+    return verdicts
+
+
+def _domain_of(value):
+    addr = email.utils.parseaddr(value or "")[1]
+    return addr.rsplit("@", 1)[1].lower() if "@" in addr else ""
+
+
+def _header_notes(msg, verdicts):
+    """Only flag what is genuinely odd. Aliased mail legitimately has a
+    differing Reply-To and Return-Path, and warning about it every time would
+    train the reader to ignore the warnings."""
+    sl = msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type") or ""
+    aliased = "forward" in sl.lower()
+    from_dom, path_dom = _domain_of(msg.get("From")), _domain_of(msg.get("Return-Path"))
+    notes = []
+    if verdicts.get("dmarc") in ("fail", "none") or verdicts.get("spf") == "fail":
+        notes.append("Authentication did not pass cleanly. Treat the sender as unproven.")
+    if from_dom and path_dom and from_dom != path_dom and not aliased:
+        notes.append("From domain (%s) differs from Return-Path (%s). Normal for "
+                     "mailing lists and forwarders, worth a look otherwise."
+                     % (from_dom, path_dom))
+    if aliased:
+        notes.append("Forwarded through a SimpleLogin alias, so a differing "
+                     "Reply-To and Return-Path are expected here, not a red flag.")
+    if msg.get("List-Unsubscribe"):
+        notes.append("Carries List-Unsubscribe, so it is bulk or marketing mail.")
+    return notes
+
+
+def tool_get_headers(args):
+    """Headers plus the authentication verdicts, for working out whether a
+    message is what it claims to be. Reports what the receiving server decided;
+    it is not a verdict of its own."""
+    folder = args.get("folder", "INBOX")
+    uid = str(args["uid"])
+    conn = imap_connect()
+    try:
+        _select_checked(conn, folder, args.get("uidvalidity"))
+        typ, md = conn.uid("FETCH", uid, "(BODY.PEEK[HEADER])")
+        if typ != "OK" or not md or md[0] is None:
+            raise ToolError("Message uid %s not found in '%s'." % (uid, folder))
+        raw = md[0][1]
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+    msg = email.message_from_bytes(raw)
+    _note_headers(msg)
+    if args.get("raw"):
+        return ("Full headers for uid %s in '%s':\n\n%s"
+                % (uid, folder, raw.decode("utf-8", "replace")[:20000]))
+
+    verdicts = _auth_verdicts(msg)
+    auth = "\n".join("  %-6s %s" % (m, verdicts.get(m, "not reported"))
+                     for m in ("spf", "dkim", "dmarc", "arc"))
+    notes = _header_notes(msg, verdicts)
+    meta = [h for h in msg.keys() if h.lower().startswith(("x-simplelogin", "x-pm-"))]
+    return (
+        "uid %s in '%s'\n\nAuthentication (as judged by the receiving server)\n%s\n\n"
+        "Addresses\n  From         %s\n  Reply-To     %s\n  Return-Path  %s\n"
+        "  To           %s\n  Cc           %s\n\nMessage\n  Subject      %s\n"
+        "  Date         %s\n  Message-ID   %s\n  List-Unsub   %s\n\n"
+        "Proton/SimpleLogin headers present\n  %s\n\nNotes\n%s"
+        % (uid, folder, auth,
+           _decode(msg.get("From")), _decode(msg.get("Reply-To")) or "(none)",
+           msg.get("Return-Path") or "(none)", _decode(msg.get("To")),
+           _decode(msg.get("Cc")) or "(none)", _decode(msg.get("Subject")),
+           _decode(msg.get("Date")), msg.get("Message-ID") or "(none)",
+           "yes" if msg.get("List-Unsubscribe") else "no",
+           ", ".join(meta) or "(none)",
+           "\n".join("  - " + n for n in notes) or "  Nothing unusual stood out."))
+
+
 def tool_read_message(args):
     folder = args.get("folder", "INBOX")
     uid = str(args["uid"])
@@ -1603,6 +1758,42 @@ TOOLS = [
             },
         },
         "handler": tool_search_mail,
+    },
+    {
+        "name": "search_all_mail",
+        "description": "Search every mailbox at once and collapse duplicates by "
+                       "Message-ID, reporting where each message lives. Use when "
+                       "you do not know which folder something is in.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string"},
+                "from": {"type": "string"},
+                "subject": {"type": "string"},
+                "since": {"type": "string", "description": "DD-Mon-YYYY."},
+                "unread_only": {"type": "boolean"},
+                "flagged_only": {"type": "boolean"},
+                "limit": {"type": "integer", "description": "Most recent N (default 25)."},
+            },
+        },
+        "handler": tool_search_all_mail,
+    },
+    {
+        "name": "get_headers",
+        "description": "Headers plus SPF/DKIM/DMARC verdicts and Proton metadata, "
+                       "for judging whether a message is what it claims to be. "
+                       "Pass raw=true for the unparsed header block.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uid": {"type": "string"},
+                "folder": {"type": "string", "description": "Default INBOX."},
+                "uidvalidity": {"type": "string"},
+                "raw": {"type": "boolean", "description": "Return the full raw header block instead."},
+            },
+            "required": ["uid"],
+        },
+        "handler": tool_get_headers,
     },
     {
         "name": "read_message",
