@@ -376,6 +376,61 @@ class DryRun(unittest.TestCase):
         self.assertIn("> two", q)
 
 
+class HeaderAnalysis(unittest.TestCase):
+    def _msg(self, extra=""):
+        return email.message_from_string(
+            "From: Bank <alerts@bank.example>\r\n"
+            "Return-Path: <bounce@bank.example>\r\n"
+            "Subject: Statement\r\n" + extra + "\r\nbody")
+
+    def test_parses_all_four_mechanisms(self):
+        m = self._msg("Authentication-Results: mx; spf=pass; dkim=fail; "
+                      "dmarc=none; arc=pass\r\n")
+        v = server._auth_verdicts(m)
+        self.assertEqual(v["spf"], "pass")
+        self.assertEqual(v["dkim"], "fail")
+        self.assertEqual(v["dmarc"], "none")
+
+    def test_clean_message_raises_nothing(self):
+        m = self._msg("Authentication-Results: mx; spf=pass; dmarc=pass\r\n")
+        self.assertEqual(server._header_notes(m, server._auth_verdicts(m)), [])
+
+    def test_failed_authentication_is_flagged(self):
+        m = self._msg("Authentication-Results: mx; spf=fail; dmarc=fail\r\n")
+        notes = server._header_notes(m, server._auth_verdicts(m))
+        self.assertTrue(any("unproven" in n for n in notes))
+
+    def test_domain_mismatch_is_flagged(self):
+        m = email.message_from_string(
+            "From: Bank <alerts@bank.example>\r\n"
+            "Return-Path: <x@totally-else.example>\r\n\r\nb")
+        notes = server._header_notes(m, {})
+        self.assertTrue(any("differs from Return-Path" in n for n in notes))
+
+    def test_alias_mail_is_not_cried_wolf_over(self):
+        m = email.message_from_string(
+            "From: Someone <them@example.com>\r\n"
+            "Reply-To: rev@passmail.example\r\n"
+            "Return-Path: <sl.abc@passmail.example>\r\n"
+            "X-SimpleLogin-Type: Forward\r\n\r\nb")
+        notes = server._header_notes(m, {})
+        self.assertFalse(any("differs from Return-Path" in n for n in notes))
+        self.assertTrue(any("not a red flag" in n for n in notes))
+
+    def test_bulk_mail_is_identified(self):
+        m = self._msg("List-Unsubscribe: <mailto:x@y.example>\r\n")
+        notes = server._header_notes(m, {})
+        self.assertTrue(any("bulk or marketing" in n for n in notes))
+
+    def test_newest_first_ordering(self):
+        old = {"date": "Mon, 01 Jan 2024 00:00:00 +0000"}
+        new = {"date": "Mon, 01 Jan 2026 00:00:00 +0000"}
+        self.assertGreater(server._sort_key(new), server._sort_key(old))
+
+    def test_unparseable_date_does_not_explode(self):
+        self.assertEqual(server._sort_key({"date": "nonsense"}), 0.0)
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()
