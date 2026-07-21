@@ -263,6 +263,65 @@ class Audit(unittest.TestCase):
         self.assertFalse(os.path.exists(server.AUDIT_LOG))
 
 
+class Replies(unittest.TestCase):
+    def setUp(self):
+        self._u, self._a = server.USER, server.ALIAS_FROM
+        server.USER, server.ALIAS_FROM = "me@example.com", "me@pm.example"
+        server._CORRESPONDENTS.clear()
+        server._TAINTED.clear()
+
+    def tearDown(self):
+        server.USER, server.ALIAS_FROM = self._u, self._a
+
+    def _msg(self, extra=""):
+        return email.message_from_string(
+            "From: alice@example.com\r\n"
+            "To: me@example.com, bob@example.com\r\n"
+            "Cc: carol@example.com, me@pm.example, bob@example.com\r\n"
+            "Subject: Re: Re: Budget\r\n"
+            "Message-ID: <abc@example.com>\r\n" + extra + "\r\nbody")
+
+    def test_reply_goes_to_the_sender(self):
+        to, cc = server._reply_targets(self._msg(), reply_all=False)
+        self.assertEqual(to, "alice@example.com")
+        self.assertEqual(cc, "")
+
+    def test_reply_to_header_wins_over_from(self):
+        m = self._msg("Reply-To: rev_alias@passmail.example\r\n")
+        to, _ = server._reply_targets(m, reply_all=False)
+        self.assertEqual(to, "rev_alias@passmail.example")
+
+    def test_reply_all_excludes_our_own_addresses(self):
+        _, cc = server._reply_targets(self._msg(), reply_all=True)
+        self.assertNotIn("me@example.com", cc)
+        self.assertNotIn("me@pm.example", cc)
+
+    def test_reply_all_deduplicates(self):
+        _, cc = server._reply_targets(self._msg(), reply_all=True)
+        self.assertEqual(cc.count("bob@example.com"), 1)
+
+    def test_stacked_prefixes_collapse_to_one(self):
+        self.assertEqual(server._reply_subject(self._msg()), "Re: Budget")
+
+    def test_subject_with_no_prefix_gains_one(self):
+        m = email.message_from_string("Subject: Budget\r\n\r\nx")
+        self.assertEqual(server._reply_subject(m), "Re: Budget")
+
+    def test_sending_requires_confirmation(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server._do_reply({"uid": "1", "body": "hi"}, reply_all=False)
+        self.assertIn("confirmed", str(cm.exception))
+
+    def test_body_is_required(self):
+        with self.assertRaises(server.ToolError):
+            server._do_reply({"uid": "1", "draft": True}, reply_all=False)
+
+    def test_quoting_marks_the_original(self):
+        q = server._quoted(self._msg().as_bytes())
+        self.assertIn("wrote:", q)
+        self.assertTrue(any(l.startswith("> ") for l in q.splitlines()))
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()

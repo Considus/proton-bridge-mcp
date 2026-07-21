@@ -570,6 +570,117 @@ def _find_drafts_folder(conn):
         return "Drafts"
 
 
+def _reply_targets(msg, reply_all):
+    """Who a reply goes to. Reply-To beats From, which is what makes replies to
+    SimpleLogin aliases land on the reverse-alias rather than unmasking you."""
+    ours = {a.lower() for a in allowed_senders() if a}
+    to_field = msg.get("Reply-To") or msg.get("From") or ""
+    to = [a for _, a in email.utils.getaddresses([to_field]) if a]
+    cc = []
+    if reply_all:
+        seen = {a.lower() for a in to} | ours
+        for _, a in email.utils.getaddresses([msg.get("To") or "",
+                                              msg.get("Cc") or ""]):
+            if a and a.lower() not in seen:
+                seen.add(a.lower())
+                cc.append(a)
+    return ", ".join(to), ", ".join(cc)
+
+
+def _reply_subject(msg):
+    base = _base_subject(_decode(msg.get("Subject")))
+    return ("Re: " + base) if base else "Re:"
+
+
+def _quoted(raw, limit=4000):
+    env = _parse_envelope(raw)
+    body = _extract_body(raw, limit)
+    head = "On %s, %s wrote:" % (env["date"] or "an earlier date",
+                                 env["from"] or "they")
+    return "\n\n" + head + "\n" + "\n".join(
+        "> " + line for line in body.splitlines())
+
+
+def _do_reply(args, reply_all):
+    as_draft = bool(args.get("draft"))
+    if not as_draft and not args.get("confirmed"):
+        raise ToolError(
+            "Refusing to send a reply without confirmed=true. Either pass "
+            "draft=true to save it for review instead, or show the user the "
+            "exact recipients, subject and body and call again with confirmed=true.")
+    body = args.get("body", "")
+    if not body:
+        raise ToolError("'body' is required.")
+    folder = args.get("folder", "INBOX")
+    uid = str(args["uid"])
+
+    conn = imap_connect()
+    try:
+        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+    msg = email.message_from_bytes(raw)
+    # Everyone on a reply came out of the headers, so register them as
+    # correspondents before the recipient check runs.
+    _note_headers(msg)
+    to, cc = _reply_targets(msg, reply_all)
+    if not to:
+        raise ToolError("Could not work out who to reply to. The message has no "
+                        "usable Reply-To or From header.")
+
+    from_address = args.get("from_address")
+    sl = msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type") or ""
+    aliased = "forward" in sl.lower()
+    if not from_address and aliased and ALIAS_FROM:
+        from_address = ALIAS_FROM  # keeps the alias masked, see README
+    _check_sender(from_address)
+    _check_recipients(to, cc)
+
+    mid = (msg.get("Message-ID") or "").strip()
+    refs = (msg.get("References") or "").split()
+    if mid and mid not in refs:
+        refs.append(mid)
+    text = body + (_quoted(raw) if args.get("quote", True) else "")
+    reply = _new_message(to, cc, args.get("subject") or _reply_subject(msg), text,
+                         in_reply_to=mid or None,
+                         references=" ".join(refs[-20:]) or None,
+                         from_address=from_address)
+
+    note = ("\n  (alias mail, sent from %s so the alias stays masked)" % from_address
+            if aliased and from_address else "")
+    if as_draft:
+        conn = imap_connect()
+        try:
+            drafts = _find_drafts_folder(conn)
+            typ, resp = conn.append(_folder_quote(drafts), r"(\Draft)", None,
+                                    reply.as_bytes())
+            if typ != "OK":
+                raise ToolError("Draft APPEND failed: %s" % resp)
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+        return ("Draft reply saved to '%s'. Nothing sent.\n  To: %s\n  Cc: %s\n"
+                "  Subject: %s%s" % (drafts, to, cc or "(none)", reply["Subject"], note))
+
+    _smtp_send(reply)
+    return ("Reply sent.\n  From: %s\n  To: %s\n  Cc: %s\n  Subject: %s%s"
+            % (from_address or USER, to, cc or "(none)", reply["Subject"], note))
+
+
+def tool_reply(args):
+    return _do_reply(args, reply_all=False)
+
+
+def tool_reply_all(args):
+    return _do_reply(args, reply_all=True)
+
+
 def tool_create_draft(args):
     to = args.get("to", "")
     cc = args.get("cc", "")
@@ -1113,7 +1224,9 @@ def tool_save_attachment(args):
 
 
 def _base_subject(s):
-    return re.sub(r"^\s*(re|fwd|fw)\s*:\s*", "", s or "", flags=re.I).strip()
+    """Strip every stacked Re:/Fwd: prefix, not just the first, so replies don't
+    accumulate them and thread matching still lines up."""
+    return re.sub(r"^(?:\s*(?:re|fwd|fw)\s*:\s*)+", "", s or "", flags=re.I).strip()
 
 
 _THREAD_HDRS = "(BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID REFERENCES IN-REPLY-TO FROM DATE)])"
@@ -1563,6 +1676,51 @@ TOOLS = [
         "handler": tool_bulk_move,
     },
     {
+        "name": "reply",
+        "description": "Reply to one message with correct threading. Replies to "
+                       "the Reply-To address when there is one, so alias mail stays "
+                       "masked. Pass draft=true to save it for review, or "
+                       "confirmed=true to send.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uid": {"type": "string"},
+                "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "body": {"type": "string", "description": "Your reply text. The original is quoted beneath unless quote=false."},
+                "subject": {"type": "string", "description": "Override the auto 'Re: ...' subject."},
+                "quote": {"type": "boolean", "description": "Quote the original beneath your reply. Default true."},
+                "from_address": {"type": "string", "description": "Must be on the sender allowlist. Left unset, alias mail automatically uses the alias-owner address."},
+                "draft": {"type": "boolean", "description": "Save to Drafts instead of sending. Needs no confirmation because nothing goes out."},
+                "confirmed": {"type": "boolean", "description": "Required to actually send. Not needed when draft=true."},
+            },
+            "required": ["uid", "body"],
+        },
+        "handler": tool_reply,
+    },
+    {
+        "name": "reply_all",
+        "description": "Reply to everyone on a message, with your own addresses "
+                       "removed from Cc and duplicates dropped. Same draft and "
+                       "confirmation rules as reply.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uid": {"type": "string"},
+                "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "body": {"type": "string", "description": "Your reply text. The original is quoted beneath unless quote=false."},
+                "subject": {"type": "string", "description": "Override the auto 'Re: ...' subject."},
+                "quote": {"type": "boolean", "description": "Quote the original beneath your reply. Default true."},
+                "from_address": {"type": "string", "description": "Must be on the sender allowlist. Left unset, alias mail automatically uses the alias-owner address."},
+                "draft": {"type": "boolean", "description": "Save to Drafts instead of sending. Needs no confirmation because nothing goes out."},
+                "confirmed": {"type": "boolean", "description": "Required to actually send. Not needed when draft=true."},
+            },
+            "required": ["uid", "body"],
+        },
+        "handler": tool_reply_all,
+    },
+    {
         "name": "create_draft",
         "description": "Write a draft into the Proton Drafts folder. Never "
                        "sends. For a reply, pass in_reply_to (the original "
@@ -1689,7 +1847,7 @@ TOOLS = [
 
 _MUTATING = {"send", "forward", "create_draft", "create_mailbox",
              "move_to_folder", "apply_label", "mark", "save_attachment",
-             "bulk_mark", "bulk_apply_label", "bulk_move"}
+             "bulk_mark", "bulk_apply_label", "bulk_move", "reply", "reply_all"}
 if READONLY:
     # Absolute guarantee: a tool that isn't registered cannot be invoked,
     # no matter what an injected instruction asks for.
