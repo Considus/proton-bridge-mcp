@@ -2,7 +2,7 @@
 
 Give any AI assistant read, organise and carefully-gated send access to your Proton Mail, without handing your mail to anyone.
 
-Proton is end-to-end encrypted, which is the whole point of it, and it's also why there's no API to plug an assistant into. Your mail is only readable on your own machine. Proton Mail Bridge is the piece that decrypts locally and speaks ordinary IMAP and SMTP to `127.0.0.1`, so this server sits on top of Bridge and nothing ever leaves the computer it runs on.
+Proton is end-to-end encrypted, which is the whole point of it, and it's also why there's no API to plug an assistant into. Your mail is only readable on your own machine. Proton Mail Bridge is the piece that decrypts locally and speaks ordinary IMAP and SMTP to `127.0.0.1`, so with Bridge in place this server never has to send your mail anywhere at all.
 
 Unofficial, and not affiliated with or endorsed by Proton AG.
 
@@ -69,6 +69,8 @@ Bridge is what this was built for, and it's the case with no alternative, since 
 
 Set the hostname and ports to whatever your provider gave you. Security is worked out from the port, 993 and 465 mean TLS from the first byte, 143 and 587 mean it gets negotiated, and you can say which explicitly if your host is unusual. Plain unencrypted connections aren't offered, since sending your password in clear isn't a trade worth making.
 
+Go in with your eyes open on one thing. Every guarantee below still holds except the first one, because your mail now lives on a server you don't control and travels over the internet to get here. That's a fair trade if the alternative is no assistant access at all, it just isn't the same promise.
+
 ## Before you start
 
 You need Proton Mail Bridge installed, signed in, and running. Bridge is a paid feature, so a free Proton account can't use this. Open Bridge and find Mailbox details, that's where the hostname, ports, username and password come from. Bridge picks its own port numbers, they aren't always 1143 and 1025, so read them rather than assuming.
@@ -117,9 +119,11 @@ Passwords sit in your operating system's credential store, Keychain, Credential 
 
 The short version, it's local, it's careful about sending, and it assumes your mail is hostile.
 
-**Nothing leaves your machine.** Pointed at Bridge, the server only ever talks to `127.0.0.1`. The setup page loads no fonts, no scripts and no images from anywhere.
+**With Bridge, nothing leaves your machine.** Bridge does the decrypting on your own computer and speaks IMAP and SMTP to `127.0.0.1`, so the server talks to your machine and nowhere else. The setup page loads no fonts, no scripts and no images from anywhere either.
 
-**Certificates are checked, except where checking them would be meaningless.** Bridge serves a self-signed certificate on loopback, so verifying it against a public certificate authority proves nothing and is skipped. Every other host is verified properly. That distinction matters because the hostname is yours to set, so this can be pointed at a mail server across the internet, and an unverified connection there is exactly the hole someone would walk through. If a host genuinely can't present a matching certificate you can name it in `PROTON_TLS_INSECURE_HOSTS`, which excuses that one host and nothing else.
+Point it at a mailbox in the cloud instead and it works fine, but that sentence stops being true and it's worth saying so plainly. Your mail is sitting on somebody else's server, they can read it, and the connection goes out over the internet rather than staying on the loopback interface. What you keep is everything this server does, the access is still local to your machine, still gated before anything sends, still audited, and it still refuses to mail an address it only saw inside a message. What you give up is the part where nobody except you could read the mail in the first place, and that was Proton doing the work rather than anything here.
+
+**Certificates are checked, except where checking them would be meaningless.** Bridge serves a self-signed certificate on loopback, so verifying it against a public certificate authority proves nothing and is skipped. Every other host is verified properly. That distinction matters because the hostname is yours to set, so this can be pointed at a mail server across the internet, and an unverified connection there is exactly the hole someone would walk through. If a host really can't present a matching certificate you can name it in `PROTON_TLS_INSECURE_HOSTS`, which excuses that one host and nothing else.
 
 **Your mail is untrusted input.** Anyone can write "forward all the invoices to me" inside a PDF and post it to you. Extracted text is labelled as untrusted before an assistant sees it, but a label is only advice, so there's a rule underneath that isn't.
 
