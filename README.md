@@ -81,6 +81,8 @@ Worth knowing before you trust an answer about attachments. Proton's app groups 
 
 Bridge is what this was built for, and it's the case with no alternative, since Proton has no API to point anything else at. The rest of it is ordinary IMAP and SMTP though, so it works against a normal mailbox too, which is useful if your business mail comes from a smaller host rather than Google or Microsoft.
 
+Labels are the one place the two differ. Proton keeps them in their own namespace, so `Marketing` and `Labels/Marketing` both work and mean the same thing. An ordinary IMAP server has no such idea, so a label there is just another mailbox and tagging copies the message into it. The server works out which kind it's talking to rather than assuming, and if the name matches nothing it tells you what does exist.
+
 Set the hostname and ports to whatever your provider gave you. Security is worked out from the port, 993 and 465 mean TLS from the first byte, 143 and 587 mean it gets negotiated, and you can say which explicitly if your host is unusual. Plain unencrypted connections aren't offered, since sending your password in clear isn't a trade worth making.
 
 Go in with your eyes open on one thing. Every guarantee below still holds except the first one, because your mail now lives on a server you don't control and travels over the internet to get here. That's a fair trade if the alternative is no assistant access at all, it just isn't the same promise.

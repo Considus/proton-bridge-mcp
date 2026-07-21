@@ -726,6 +726,53 @@ class PollingCursor(unittest.TestCase):
             oct(os.stat(server.STATE_FILE).st_mode & 0o777), "0o600")
 
 
+class LabelResolution(unittest.TestCase):
+    """A label is namespaced under Labels/ on Proton and is an ordinary mailbox
+    everywhere else. Detect which, rather than assuming Proton."""
+
+    class Fake:
+        def __init__(self, boxes):
+            self.boxes = boxes
+        def list(self):
+            return "OK", ['(\\HasNoChildren) "/" "%s"' % b for b in self.boxes]
+
+    PROTON = ["INBOX", "Archive", "Labels/Invoices", "Labels/Marketing",
+              "Folders/Work"]
+    PLAIN = ["INBOX", "Archive", "Receipts", "Work"]
+
+    def test_bare_name_gains_the_namespace_on_proton(self):
+        self.assertEqual(
+            server._resolve_label(self.Fake(self.PROTON), "Marketing"),
+            "Labels/Marketing")
+
+    def test_already_namespaced_is_left_alone(self):
+        self.assertEqual(
+            server._resolve_label(self.Fake(self.PROTON), "Labels/Invoices"),
+            "Labels/Invoices")
+
+    def test_plain_server_uses_the_mailbox_as_given(self):
+        self.assertEqual(
+            server._resolve_label(self.Fake(self.PLAIN), "Receipts"), "Receipts")
+
+    def test_plain_server_matches_case_insensitively(self):
+        self.assertEqual(
+            server._resolve_label(self.Fake(self.PLAIN), "receipts"), "Receipts")
+
+    def test_unknown_label_lists_what_exists(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server._resolve_label(self.Fake(self.PROTON), "Nope")
+        self.assertIn("Labels/Marketing", str(cm.exception))
+
+    def test_unknown_mailbox_explains_the_plain_case(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server._resolve_label(self.Fake(self.PLAIN), "Nope")
+        self.assertIn("no Labels/ namespace", str(cm.exception))
+
+    def test_empty_label_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._resolve_label(self.Fake(self.PLAIN), "  ")
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()
