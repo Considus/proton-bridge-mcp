@@ -108,7 +108,9 @@ The short version, it's local, it's careful about sending, and it assumes your m
 
 **Everything that changes something is logged.** Sends, moves, labels, drafts, new folders, saved attachments, each one appended to `audit.log` next to the server as a single line of JSON, owner-readable only. Message bodies are never written, only their length, so the log tells you what happened without quietly becoming a second copy of your mailbox. Refusals are recorded too, which is the half you'd actually want after something odd. Turn it off with `PROTON_AUDIT=0` if you'd rather.
 
-**Batches can be previewed first.** The bulk tools take `dry_run=true` and tell you exactly which messages they'd touch without touching any of them. They only accept explicit numbered messages, never "everything in this folder", and they stop at 50 a call. Bulk moves need confirming on top of that, because marking something read is easy to undo and moving 50 messages isn't.
+**Anything can be previewed first.** Every tool that changes something takes `dry_run=true`. You get the exact message that would go out, or the actual subject and sender of the mail that would move, and nothing happens. A preview needs no confirmation, since a preview is harmless, but it still runs every check, so if the real thing would be refused the preview tells you that rather than showing you a comforting fiction.
+
+**Batches are narrower than they look.** The bulk tools only accept explicit numbered messages, never "everything in this folder", and they stop at 50 a call. Bulk moves need confirming on top of the preview, because marking something read is easy to undo and moving 50 messages isn't.
 
 **Want none of it?** Set `PROTON_READONLY=1` and every tool that changes anything disappears from the list. A tool that isn't there can't be talked into running.
 
