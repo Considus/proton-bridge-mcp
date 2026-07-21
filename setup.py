@@ -166,11 +166,16 @@ def server_command():
     return VENV_PY if os.path.exists(VENV_PY) else sys.executable
 
 
-def mcp_settings(iuser, alias_from, ihost, iport, suser, shost, sport):
+def mcp_settings(iuser, alias_from, ihost, iport, suser, shost, sport,
+                 isec="auto", ssec="auto"):
     """Non-secret settings the server reads from settings.json."""
     v = {"PROTON_USER": iuser,
          "PROTON_IMAP_HOST": ihost, "PROTON_IMAP_PORT": str(iport),
          "PROTON_SMTP_HOST": shost, "PROTON_SMTP_PORT": str(sport)}
+    if isec and isec != "auto":
+        v["PROTON_IMAP_SECURITY"] = isec
+    if ssec and ssec != "auto":
+        v["PROTON_SMTP_SECURITY"] = ssec
     if suser and suser != iuser:
         v["PROTON_SMTP_USER"] = suser
     if alias_from:
@@ -258,6 +263,7 @@ h1{font-family:var(--serif);font-weight:300;font-size:40px;line-height:1.15;marg
 .row:last-child{border-bottom:none}
 label{display:block;font-size:0.68rem;font-weight:500;letter-spacing:.12em;
       text-transform:uppercase;color:var(--muted);margin-bottom:8px;line-height:1.4}
+select{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-family:var(--sans);font-size:1rem;font-weight:400;padding:3px 0}
 input{width:100%;background:transparent;border:none;outline:none;color:var(--text);
       font-family:var(--sans);font-size:1rem;font-weight:400;letter-spacing:.01em;padding:3px 0}
 input::placeholder{color:var(--muted);opacity:.55;font-weight:400}
@@ -295,6 +301,16 @@ def row(label, name, value="", placeholder="", kind="text"):
  spellcheck="false" %s></div>""" % (
         name, html.escape(label), name, name, kind, html.escape(value),
         html.escape(placeholder), "required" if kind != "text" or name else "")
+
+
+def select_row(label, name, options, value=""):
+    opts = "".join(
+        '<option value="%s"%s>%s</option>'
+        % (v, " selected" if v == value else "", html.escape(t))
+        for v, t in options)
+    return ('<div class="row"><label for="%s">%s</label>'
+            '<select id="%s" name="%s">%s</select></div>'
+            % (name, html.escape(label), name, name, opts))
 
 
 def fixed_row(label, value):
@@ -352,13 +368,13 @@ secure credential store, and this page shuts down the moment setup completes.</p
        row("Port", "imap_port", e.get("PROTON_IMAP_PORT", ""), "from Bridge"),
        row("Username", "imap_user", e.get("PROTON_USER", ""), "from Bridge"),
        row("Password", "imap_pass", "", pw_ph, "password"),
-       fixed_row("Security", "STARTTLS"),
+       select_row("Security", "imap_security", [('auto', 'Automatic (by port)'), ('starttls', 'STARTTLS'), ('ssl', 'SSL / TLS')], e.get("PROTON_IMAP_SECURITY", "auto")),
        row("Hostname", "smtp_host", e.get("PROTON_SMTP_HOST", "127.0.0.1")),
        row("Port", "smtp_port", e.get("PROTON_SMTP_PORT", ""), "from Bridge"),
        row("Username", "smtp_user",
            e.get("PROTON_SMTP_USER") or e.get("PROTON_USER", ""), "from Bridge"),
        row("Password", "smtp_pass", "", pw_ph, "password"),
-       fixed_row("Security", "STARTTLS"),
+       select_row("Security", "smtp_security", [('auto', 'Automatic (by port)'), ('starttls', 'STARTTLS'), ('ssl', 'SSL / TLS')], e.get("PROTON_SMTP_SECURITY", "auto")),
        html.escape(e.get("PROTON_ALIAS_FROM", "")),
        "Save changes" if updating else "Verify and finish setup",
        "Both connections are re-tested before anything is saved."
@@ -457,9 +473,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except ValueError:
             self._send(form_page(existing=EXISTING, error="Ports must be numbers — copy them from Bridge.")); return
 
+        isec, ssec = g("imap_security", "auto"), g("smtp_security", "auto")
         try:
             mailboxes = verify(user, pw, ihost, iport_i,
-                               smtp_user, smtp_pass, shost, sport_i)
+                               smtp_user, smtp_pass, shost, sport_i,
+                               isec, ssec)
         except RuntimeError as e:
             self._send(form_page(existing=EXISTING, error=str(e))); return
 
@@ -473,7 +491,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(form_page(existing=EXISTING, error=str(e))); return
 
         settings = mcp_settings(user, g("alias_from"), ihost, iport_i,
-                                smtp_user, shost, sport_i)
+                                smtp_user, shost, sport_i, isec, ssec)
         saved_to = save_settings(settings)
         self._send(done_page(user, store, mailboxes, saved_to))
         threading.Thread(target=lambda: (time.sleep(1.5),

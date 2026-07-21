@@ -512,6 +512,60 @@ class Unsubscribe(unittest.TestCase):
                          "me.abc@passmail.example")
 
 
+class TlsPolicy(unittest.TestCase):
+    """Verification off is correct for Bridge on loopback and dangerous
+    anywhere else. The host is configurable, so this must not be blanket."""
+
+    def setUp(self):
+        os.environ.pop("PROTON_TLS_INSECURE_HOSTS", None)
+        server._SETTINGS = {}
+
+    tearDown = setUp
+
+    def test_loopback_skips_verification(self):
+        for host in ("127.0.0.1", "localhost", "::1"):
+            self.assertEqual(server._tls_context(host).verify_mode, __import__("ssl").CERT_NONE)
+
+    def test_remote_host_is_verified(self):
+        import ssl as _ssl
+        ctx = server._tls_context("imap.example.com")
+        self.assertEqual(ctx.verify_mode, _ssl.CERT_REQUIRED)
+        self.assertTrue(ctx.check_hostname)
+
+    def test_a_host_can_be_excused_by_name_only(self):
+        import ssl as _ssl
+        os.environ["PROTON_TLS_INSECURE_HOSTS"] = "mail.smallhost.example"
+        self.assertEqual(
+            server._tls_context("mail.smallhost.example").verify_mode, _ssl.CERT_NONE)
+        # excusing one host must not excuse the rest
+        self.assertEqual(
+            server._tls_context("imap.example.com").verify_mode, _ssl.CERT_REQUIRED)
+
+    def test_auto_picks_implicit_tls_on_secure_ports(self):
+        self.assertEqual(server._security_mode("PROTON_IMAP_SECURITY", 993), "ssl")
+        self.assertEqual(server._security_mode("PROTON_SMTP_SECURITY", 465), "ssl")
+
+    def test_auto_picks_starttls_elsewhere(self):
+        for port in (143, 587, 1143, 1025):
+            self.assertEqual(
+                server._security_mode("PROTON_IMAP_SECURITY", port), "starttls")
+
+    def test_explicit_mode_wins(self):
+        os.environ["PROTON_IMAP_SECURITY"] = "ssl"
+        try:
+            self.assertEqual(server._security_mode("PROTON_IMAP_SECURITY", 143), "ssl")
+        finally:
+            os.environ.pop("PROTON_IMAP_SECURITY", None)
+
+    def test_nonsense_mode_is_rejected(self):
+        os.environ["PROTON_IMAP_SECURITY"] = "plaintext"
+        try:
+            with self.assertRaises(server.ToolError):
+                server._security_mode("PROTON_IMAP_SECURITY", 143)
+        finally:
+            os.environ.pop("PROTON_IMAP_SECURITY", None)
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()

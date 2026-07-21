@@ -24,6 +24,10 @@ Configuration (environment variables):
     PROTON_IMAP_PORT     default 1143   <- Bridge may assign a different port
     PROTON_SMTP_HOST     default 127.0.0.1
     PROTON_SMTP_PORT     default 1025   <- Bridge may assign a different port
+    PROTON_IMAP_SECURITY default auto (auto | ssl | starttls)
+    PROTON_SMTP_SECURITY default auto (auto | ssl | starttls)
+    PROTON_TLS_INSECURE_HOSTS  comma list of remote hosts whose certificate is
+                         not verified. Loopback never needs listing.
     PROTON_SETTINGS_FILE default ./settings.json (written by setup.py)
     PROTON_KEYCHAIN_SVC  default proton-bridge-imap
     PROTON_ATTACH_DIR    default ./attachments
@@ -236,21 +240,87 @@ class ToolError(Exception):
 # ----------------------------------------------------------------------------
 # IMAP helpers
 # ----------------------------------------------------------------------------
-def _tls_context():
-    # Bridge presents a self-signed cert on loopback. Verifying it against a
-    # public CA is meaningless for 127.0.0.1, so we skip verification — the
-    # connection never leaves the machine.
+_LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+
+def _is_loopback(host):
+    return (host or "").strip().lower() in _LOOPBACK
+
+
+def _insecure_hosts():
+    return {h.strip().lower()
+            for h in _cfg("PROTON_TLS_INSECURE_HOSTS").split(",") if h.strip()}
+
+
+def _tls_context(host):
+    """Verification is skipped ONLY on loopback, where Bridge presents a
+    self-signed certificate and checking it against a public CA proves nothing.
+
+    Anywhere else it is enforced. The host is configurable, so this server can
+    be pointed at a mail provider across the internet, and an unverified TLS
+    session there is a man-in-the-middle waiting to happen. A specific remote
+    host can be excused through PROTON_TLS_INSECURE_HOSTS, which exists because
+    small hosts often serve a certificate for the hosting company rather than
+    for your own domain, but it has to be named deliberately."""
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    if _is_loopback(host) or (host or "").strip().lower() in _insecure_hosts():
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
     return ctx
+
+
+def _security_mode(var, port):
+    """auto picks implicit TLS on the standard secure ports, STARTTLS elsewhere.
+    Plain text is not offered; a password in clear is not a trade worth making."""
+    mode = (_cfg(var, "auto") or "auto").strip().lower()
+    if mode not in ("auto", "ssl", "starttls"):
+        raise ToolError("%s must be auto, ssl or starttls (got %r)." % (var, mode))
+    if mode == "auto":
+        return "ssl" if int(port) in (993, 465) else "starttls"
+    return mode
+
+
+def _tls_help(host, port, mode, err):
+    excusable = not _is_loopback(host)
+    return (
+        "Could not establish a secure connection to %s:%s using %s.\n  %s\n\n"
+        "Worth checking:\n"
+        "  - the port. 993 and 465 expect TLS from the start, 143 and 587 "
+        "usually negotiate it with STARTTLS. Set PROTON_IMAP_SECURITY or "
+        "PROTON_SMTP_SECURITY to ssl or starttls to be explicit.\n"
+        "  - the hostname. It has to match the certificate. Smaller hosts often "
+        "serve one for mail.theirhostingcompany.com rather than for your own "
+        "domain, so connecting to their name instead usually fixes it.%s"
+        % (host, port, mode, err,
+           "\n  - if the certificate genuinely cannot be made to match, name "
+           "this host in PROTON_TLS_INSECURE_HOSTS. That turns verification off "
+           "for it and accepts that the connection could be intercepted."
+           if excusable else ""))
 
 
 def imap_connect():
     require_user()
-    conn = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
-    conn.starttls(_tls_context())
-    conn.login(USER, get_password())
+    mode = _security_mode("PROTON_IMAP_SECURITY", IMAP_PORT)
+    ctx = _tls_context(IMAP_HOST)
+    try:
+        if mode == "ssl":
+            conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=ctx)
+        else:
+            conn = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+            conn.starttls(ctx)
+    except ssl.SSLError as e:
+        raise ToolError(_tls_help(IMAP_HOST, IMAP_PORT, mode, e))
+    except OSError as e:
+        raise ToolError("Cannot reach the IMAP server at %s:%s (%s). If this is "
+                        "Proton Bridge, check it is running and signed in; Bridge "
+                        "assigns its own ports."
+                        % (IMAP_HOST, IMAP_PORT, e))
+    try:
+        conn.login(USER, get_password())
+    except imaplib.IMAP4.error as e:
+        raise ToolError("The mail server rejected the login for '%s' (%s). For "
+                        "Bridge, use the Bridge password rather than your Proton "
+                        "account password." % (USER, e))
     return conn
 
 
@@ -1241,12 +1311,27 @@ def tool_move_to_folder(args):
 
 
 def _smtp_send(msg):
-    ctx = _tls_context()
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
+    mode = _security_mode("PROTON_SMTP_SECURITY", SMTP_PORT)
+    ctx = _tls_context(SMTP_HOST)
+    smtp_user, smtp_pw = smtp_credentials()
+    try:
+        if mode == "ssl":
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30, context=ctx)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30)
+    except ssl.SSLError as e:
+        raise ToolError(_tls_help(SMTP_HOST, SMTP_PORT, mode, e))
+    except OSError as e:
+        raise ToolError("Cannot reach the SMTP server at %s:%s (%s)."
+                        % (SMTP_HOST, SMTP_PORT, e))
+    with server as s:
         s.ehlo()
-        s.starttls(context=ctx)
-        s.ehlo()
-        smtp_user, smtp_pw = smtp_credentials()
+        if mode != "ssl":
+            try:
+                s.starttls(context=ctx)
+            except ssl.SSLError as e:
+                raise ToolError(_tls_help(SMTP_HOST, SMTP_PORT, mode, e))
+            s.ehlo()
         s.login(smtp_user, smtp_pw)
         s.send_message(msg)
 
