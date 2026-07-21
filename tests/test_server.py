@@ -191,6 +191,78 @@ class UidValidity(unittest.TestCase):
             server._select_checked(Bad("1"), "Nope", None)
 
 
+class BulkGuards(unittest.TestCase):
+    def test_rejects_non_numeric_uids(self):
+        with self.assertRaises(server.ToolError):
+            server._parse_uids({"uids": ["12", "all"]})
+
+    def test_rejects_empty(self):
+        with self.assertRaises(server.ToolError):
+            server._parse_uids({"uids": []})
+
+    def test_accepts_a_comma_string(self):
+        self.assertEqual(server._parse_uids({"uids": "1, 2 3"}), ["1", "2", "3"])
+
+    def test_deduplicates(self):
+        self.assertEqual(server._parse_uids({"uids": ["4", "4", "5"]}), ["4", "5"])
+
+    def test_enforces_the_cap(self):
+        with self.assertRaises(server.ToolError):
+            server._parse_uids({"uids": [str(i) for i in range(server.MAX_BULK + 1)]})
+
+    def test_bulk_move_refuses_without_confirmation(self):
+        with self.assertRaises(server.ToolError):
+            server.tool_bulk_move({"uids": ["1"], "to_folder": "Trash"})
+
+    def test_dry_run_touches_nothing(self):
+        out = server._bulk({"uids": ["1", "2"], "dry_run": True}, "move",
+                           lambda c, u: (_ for _ in ()).throw(
+                               AssertionError("must not run")))
+        self.assertIn("DRY RUN", out)
+
+
+class Audit(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._log, self._on = server.AUDIT_LOG, server.AUDIT_ENABLED
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.AUDIT_ENABLED = True
+
+    def tearDown(self):
+        server.AUDIT_LOG, server.AUDIT_ENABLED = self._log, self._on
+
+    def _read(self):
+        with open(server.AUDIT_LOG) as f:
+            return [json.loads(l) for l in f if l.strip()]
+
+    def test_records_the_action(self):
+        server._audit("send", {"to": "a@b.example"}, "ok", "Sent")
+        rec = self._read()[0]
+        self.assertEqual(rec["tool"], "send")
+        self.assertEqual(rec["outcome"], "ok")
+        self.assertEqual(rec["args"]["to"], "a@b.example")
+        self.assertIn("ts", rec)
+
+    def test_body_is_never_written(self):
+        server._audit("send", {"to": "a@b.example", "body": "secret words"}, "ok")
+        raw = open(server.AUDIT_LOG).read()
+        self.assertNotIn("secret words", raw)
+        self.assertIn("not logged", raw)
+
+    def test_written_owner_only(self):
+        server._audit("mark", {"uid": "1"}, "ok")
+        self.assertEqual(oct(os.stat(server.AUDIT_LOG).st_mode & 0o777), "0o600")
+
+    def test_never_raises(self):
+        server.AUDIT_LOG = "/nonexistent-dir/audit.log"
+        server._audit("send", {"to": "a@b.example"}, "ok")  # must not raise
+
+    def test_disabled_writes_nothing(self):
+        server.AUDIT_ENABLED = False
+        server._audit("send", {"to": "a@b.example"}, "ok")
+        self.assertFalse(os.path.exists(server.AUDIT_LOG))
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()

@@ -7,3 +7,4 @@ attachments/
 *.bak.*
 .DS_Store
 settings.json
+audit.log*

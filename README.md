@@ -8,7 +8,7 @@ Unofficial, and not affiliated with or endorsed by Proton AG.
 
 ## What it can do
 
-Search and read mail, pull attachments out and read them (including the text of PDF invoices), tag and file messages, write drafts, and send or forward with a confirmation step you can't talk it out of.
+Search and read mail, pull attachments out and read them (including the text of PDF invoices), tag and file messages one at a time or in batches, write drafts, and send or forward with a confirmation step you can't talk it out of.
 
 | Tool | What it does |
 |---|---|
@@ -21,6 +21,9 @@ Search and read mail, pull attachments out and read them (including the text of 
 | `save_attachment` | Writes a file out, deleted again after 15 minutes unless you say otherwise |
 | `purge_attachments` | Deletes those files now |
 | `find_thread` | The whole conversation, and which messages carry documents |
+| `bulk_mark` | Read, unread, star or unstar many messages in one pass |
+| `bulk_apply_label` | One label onto many messages |
+| `bulk_move` | File or Trash many at once, gated |
 | `create_draft` | Writes into Drafts, never sends |
 | `mark` | Read, unread, star, unstar |
 | `apply_label` | Tags a message, leaves it where it is |
@@ -96,6 +99,10 @@ The short version, it's local, it's careful about sending, and it assumes your m
 **Mail can only go out as you.** `from_address` is checked against an allowlist that starts as your own address and your alias-owner address, nothing else. An injected instruction can't make mail appear to come from someone else, and widening it means editing `PROTON_ALLOWED_SENDERS` yourself.
 
 **Sending always stops.** `send`, `forward` and `create_mailbox` refuse unless the assistant passes `confirmed=true`, which it should only do after showing you the exact recipient, subject and body. That one is a speed bump rather than a wall, an assistant that had been fully talked round could set it, which is exactly why the address rule above exists as well.
+
+**Everything that changes something is logged.** Sends, moves, labels, drafts, new folders, saved attachments, each one appended to `audit.log` next to the server as a single line of JSON, owner-readable only. Message bodies are never written, only their length, so the log tells you what happened without quietly becoming a second copy of your mailbox. Refusals are recorded too, which is the half you'd actually want after something odd. Turn it off with `PROTON_AUDIT=0` if you'd rather.
+
+**Batches can be previewed first.** The bulk tools take `dry_run=true` and tell you exactly which messages they'd touch without touching any of them. They only accept explicit numbered messages, never "everything in this folder", and they stop at 50 a call. Bulk moves need confirming on top of that, because marking something read is easy to undo and moving 50 messages isn't.
 
 **Want none of it?** Set `PROTON_READONLY=1` and every tool that changes anything disappears from the list. A tool that isn't there can't be talked into running.
 
