@@ -12,11 +12,15 @@ Search and read mail, pull attachments out and read them (including the text of 
 
 Anything that sends takes `draft=true` instead, which puts it in your Drafts for you to look at. That path needs no confirmation, because nothing goes anywhere.
 
+Files can be attached to anything you send, though only from directories you've said are allowed. Reading any file on the machine and posting it out is how data walks off a computer, so the default is the attachments folder and widening it is your decision, not something an instruction in an email can talk it into.
+
 | Tool | What it does |
 |---|---|
 | `list_folders` | Every folder and label, read live each time |
 | `folder_status` | Counts, plus the UIDVALIDITY every uid in that folder depends on |
-| `search_mail` | Search by text, sender, subject, date, unread, starred |
+| `poll_mailbox` | What has arrived since you last looked |
+| `ack_mailbox` | Confirms a batch was handled |
+| `search_mail` | Search by text, sender, subject, date range, unread, starred |
 | `search_all_mail` | The same search across every mailbox, duplicates collapsed |
 | `get_headers` | Headers with SPF, DKIM and DMARC verdicts, and Proton metadata |
 | `read_message` | Full headers and body |
@@ -40,10 +44,20 @@ Anything that sends takes `draft=true` instead, which puts it in your Drafts for
 | `apply_label` | Tags a message, leaves it where it is |
 | `move_to_folder` | Files it somewhere else |
 | `create_mailbox` | New folder or label, gated |
-| `send` | Gated |
+| `send` | Gated, and can carry attachments |
 | `forward` | Gated |
 
 Two things it can't do, and won't pretend otherwise. Bridge has no access to Proton's server-side filters or auto-forwarding rules, so those stay a manual job in the Proton web app. And nothing here hard-deletes, the furthest it goes is Trash.
+
+### Watching for new mail
+
+`poll_mailbox` hands back whatever has turned up since you last looked, which is what turns this from something that reads your mail when asked into something that can react to mail arriving.
+
+The first poll on a mailbox returns nothing on purpose. It notes where the mailbox currently ends, so switching it on doesn't dump years of backlog into a conversation. It reads nothing as read either.
+
+If you're doing something with each message that you'd rather not do twice, poll with `advance=false`. You get the batch and a checkpoint, the cursor stays where it was, and polling again hands you the same batch until you confirm with `ack_mailbox`. Crash halfway and you pick up where you left off instead of losing the lot. Confirming twice is harmless.
+
+The cursor records the UIDVALIDITY next to the message number, so a mailbox that resyncs underneath you is spotted rather than acted on. When that happens it re-anchors to the current end and says so, because the alternative is replaying whatever those old numbers now point at.
 
 ### Getting at attachments
 
@@ -145,7 +159,9 @@ Point it at a mailbox in the cloud instead and it works fine, but that sentence 
 
 **Batches are narrower than they look.** The bulk tools only accept explicit numbered messages, never "everything in this folder", and they stop at 50 a call. Bulk moves need confirming on top of the preview, because marking something read is easy to undo and moving 50 messages isn't.
 
-**Want none of it?** Set `PROTON_READONLY=1` and every tool that changes anything disappears from the list. A tool that isn't there can't be talked into running.
+**Three settings, not two.** `PROTON_MODE=readonly` removes every tool that changes anything. `PROTON_MODE=organise` is the one most people probably want, it can file, label, tag and draft, but the tools that put mail on the wire aren't there at all. `full` is everything. These remove tools rather than guarding them, and a tool that isn't there can't be talked into running.
+
+**There's a ceiling on a bad hour.** Sending is capped at 30 an hour and organising at 2000, both adjustable. The audit log tells you what happened after the fact, a limit stops it happening two hundred more times. Sends are capped far tighter than filing on purpose, since moving a thousand messages is tidying up and sending a thousand is an incident.
 
 **Attachments are files, not code.** Nothing is ever executed. Saved files are confined to the `attachments` directory, written owner-only and never executable, and they delete themselves after 15 minutes. One thing to be aware of though, files written this way don't carry the quarantine flag your browser or mail client would add, so your operating system won't warn you about them. Don't open executables that arrived by email.
 

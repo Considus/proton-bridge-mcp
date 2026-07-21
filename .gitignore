@@ -8,3 +8,4 @@ attachments/
 .DS_Store
 settings.json
 audit.log*
+state.json

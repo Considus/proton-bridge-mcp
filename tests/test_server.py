@@ -566,6 +566,166 @@ class TlsPolicy(unittest.TestCase):
             os.environ.pop("PROTON_IMAP_SECURITY", None)
 
 
+class OutgoingAttachments(unittest.TestCase):
+    """Reading a file and mailing it is the neatest exfiltration route there
+    is, so sources are confined the same way writes are."""
+
+    def setUp(self):
+        os.environ.pop("PROTON_ATTACH_SOURCE_DIRS", None)
+        server._SETTINGS = {}
+        os.makedirs(server.ATTACH_DIR, exist_ok=True)
+        self.ok = os.path.join(server.ATTACH_DIR, "unit-test-file.txt")
+        with open(self.ok, "w") as f:
+            f.write("hello")
+
+    def tearDown(self):
+        os.environ.pop("PROTON_ATTACH_SOURCE_DIRS", None)
+        try:
+            os.remove(self.ok)
+        except OSError:
+            pass
+
+    def test_file_inside_the_root_is_allowed(self):
+        self.assertTrue(server._resolve_source(self.ok).endswith("unit-test-file.txt"))
+
+    def test_absolute_path_outside_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._resolve_source("/etc/hosts")
+
+    def test_traversal_out_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._resolve_source(os.path.join(server.ATTACH_DIR, "..", "server.py"))
+
+    def test_missing_file_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._resolve_source(os.path.join(server.ATTACH_DIR, "nope.txt"))
+
+    def test_extra_root_can_be_configured(self):
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "x.txt")
+        with open(path, "w") as f:
+            f.write("x")
+        with self.assertRaises(server.ToolError):
+            server._resolve_source(path)
+        os.environ["PROTON_ATTACH_SOURCE_DIRS"] = tmp
+        self.assertTrue(server._resolve_source(path))
+
+    def test_too_many_files_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._load_attachments(
+                {"attach": [self.ok] * (server.MAX_OUTGOING_FILES + 1)})
+
+    def test_attachment_reaches_the_message(self):
+        files = server._load_attachments({"attach": [self.ok]})
+        msg = server._new_message("a@b.example", "", "s", "body",
+                                  attachments=files)
+        names = [p.get_filename() for p in msg.walk() if p.get_filename()]
+        self.assertIn("unit-test-file.txt", names)
+
+    def test_no_attachments_leaves_the_message_simple(self):
+        self.assertEqual(server._load_attachments({}), [])
+
+
+class PermissionModes(unittest.TestCase):
+    def test_readonly_removes_everything_mutating(self):
+        os.environ["PROTON_MODE"] = "readonly"
+        try:
+            self.assertEqual(server._mode(), "readonly")
+        finally:
+            os.environ.pop("PROTON_MODE", None)
+
+    def test_organise_is_the_middle_setting(self):
+        os.environ["PROTON_MODE"] = "organise"
+        try:
+            self.assertEqual(server._mode(), "organise")
+        finally:
+            os.environ.pop("PROTON_MODE", None)
+
+    def test_legacy_readonly_flag_still_honoured(self):
+        os.environ["PROTON_READONLY"] = "1"
+        try:
+            self.assertEqual(server._mode(), "readonly")
+        finally:
+            os.environ.pop("PROTON_READONLY", None)
+
+    def test_nonsense_falls_back_to_full(self):
+        os.environ["PROTON_MODE"] = "banana"
+        try:
+            self.assertEqual(server._mode(), "full")
+        finally:
+            os.environ.pop("PROTON_MODE", None)
+
+
+class RateLimit(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._sf, self._limits = server.STATE_FILE, dict(server.RATE_LIMITS)
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+
+    def tearDown(self):
+        server.STATE_FILE = self._sf
+        server.RATE_LIMITS.clear()
+        server.RATE_LIMITS.update(self._limits)
+
+    def test_sends_are_capped(self):
+        server.RATE_LIMITS["send"] = 2
+        server._rate_check("send")
+        server._rate_check("send")
+        with self.assertRaises(server.ToolError) as cm:
+            server._rate_check("send")
+        self.assertIn("Rate limit", str(cm.exception))
+
+    def test_buckets_are_separate(self):
+        server.RATE_LIMITS["send"] = 1
+        server.RATE_LIMITS["write"] = 5
+        server._rate_check("send")
+        server._rate_check("mark")  # write bucket, unaffected
+        with self.assertRaises(server.ToolError):
+            server._rate_check("reply")
+
+    def test_zero_disables_the_limit(self):
+        server.RATE_LIMITS["send"] = 0
+        for _ in range(50):
+            server._rate_check("send")
+
+
+class PollingCursor(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._sf = server.STATE_FILE
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+
+    def tearDown(self):
+        server.STATE_FILE = self._sf
+
+    def test_ack_rejects_a_malformed_checkpoint(self):
+        with self.assertRaises(server.ToolError):
+            server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "nonsense"})
+
+    def test_ack_commits_then_is_idempotent(self):
+        first = server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:100"})
+        self.assertIn("committed", first)
+        again = server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:100"})
+        self.assertIn("Nothing to do", again)
+
+    def test_ack_never_moves_the_cursor_backwards(self):
+        server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:100"})
+        server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:50"})
+        self.assertEqual(
+            server._read_state()["cursors"]["INBOX"]["last_uid"], 100)
+
+    def test_checkpoint_from_another_generation_is_refused(self):
+        server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:100"})
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "9:101"})
+        self.assertIn("resynced", str(cm.exception))
+
+    def test_state_is_written_owner_only(self):
+        server._write_state({"cursors": {}})
+        self.assertEqual(
+            oct(os.stat(server.STATE_FILE).st_mode & 0o777), "0o600")
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()

@@ -24,6 +24,10 @@ Configuration (environment variables):
     PROTON_IMAP_PORT     default 1143   <- Bridge may assign a different port
     PROTON_SMTP_HOST     default 127.0.0.1
     PROTON_SMTP_PORT     default 1025   <- Bridge may assign a different port
+    PROTON_MODE          default full (full | organise | readonly)
+    PROTON_RATE_SEND_PER_HOUR   default 30
+    PROTON_RATE_WRITE_PER_HOUR  default 2000
+    PROTON_ATTACH_SOURCE_DIRS   directories a file may be attached from
     PROTON_IMAP_SECURITY default auto (auto | ssl | starttls)
     PROTON_SMTP_SECURITY default auto (auto | ssl | starttls)
     PROTON_TLS_INSECURE_HOSTS  comma list of remote hosts whose certificate is
@@ -39,6 +43,7 @@ import email.utils
 import imaplib
 import io
 import json
+import mimetypes
 import os
 import re
 import smtplib
@@ -98,6 +103,14 @@ MAX_BULK = int(_cfg("PROTON_MAX_BULK", "50"))
 # Inline images go into the conversation, so this cap is far tighter than the
 # general attachment limit.
 MAX_FETCH_BYTES = int(_cfg("PROTON_MAX_FETCH_MB", "2")) * 1024 * 1024
+MAX_OUTGOING_BYTES = int(_cfg("PROTON_MAX_OUTGOING_MB", "20")) * 1024 * 1024
+MAX_OUTGOING_FILES = int(_cfg("PROTON_MAX_OUTGOING_FILES", "10"))
+STATE_FILE = _cfg("PROTON_STATE_FILE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "state.json")
+# Sends are capped far tighter than organising. Filing a thousand messages is
+# tidying; sending a thousand is an incident.
+RATE_LIMITS = {"send": int(_cfg("PROTON_RATE_SEND_PER_HOUR", "30")),
+               "write": int(_cfg("PROTON_RATE_WRITE_PER_HOUR", "2000"))}
 ATTACH_DIR = _cfg("PROTON_ATTACH_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "attachments")
 
@@ -231,6 +244,71 @@ def _audit(tool, args, outcome, detail=""):
             f.write(json.dumps(record) + "\n")
     except Exception:
         pass
+
+
+# ----------------------------------------------------------------------------
+# Persistent state, shared by the rate limiter and the polling cursors
+# ----------------------------------------------------------------------------
+def _read_state():
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _write_state(state):
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp, STATE_FILE)
+    try:
+        os.chmod(STATE_FILE, 0o600)
+    except OSError:
+        pass
+
+
+_SEND_TOOLS = {"send", "forward", "reply", "reply_all", "send_draft", "unsubscribe"}
+
+
+def _rate_check(tool):
+    """A cap on how much damage a bad hour can do. The audit log tells you what
+    happened afterwards; this stops it happening a thousand times first."""
+    bucket = "send" if tool in _SEND_TOOLS else "write"
+    limit = RATE_LIMITS.get(bucket, 0)
+    if limit <= 0:
+        return
+    now = time.time()
+    state = _read_state()
+    hits = [t for t in state.get("rate", {}).get(bucket, []) if now - t < 3600]
+    if len(hits) >= limit:
+        oldest = min(hits)
+        raise ToolError(
+            "Rate limit reached for %s operations (%d in the last hour, limit "
+            "%d). The next slot frees up in about %d minutes. Raise "
+            "PROTON_RATE_%s_PER_HOUR if this limit is wrong for how you work."
+            % (bucket, len(hits), limit,
+               max(1, int((3600 - (now - oldest)) / 60)), bucket.upper()))
+    hits.append(now)
+    state.setdefault("rate", {})[bucket] = hits
+    _write_state(state)
+
+
+# ----------------------------------------------------------------------------
+# Permission mode
+# ----------------------------------------------------------------------------
+_ORGANISE_ONLY = {"send", "forward", "reply", "reply_all", "send_draft"}
+
+
+def _mode():
+    """readonly cannot change anything. organise can file, label and draft but
+    never sends. full is everything. A tool that is not registered cannot be
+    talked into running, so this removes them rather than guarding them."""
+    if _cfg("PROTON_READONLY", "").lower() in ("1", "true", "yes", "on"):
+        return "readonly"
+    mode = (_cfg("PROTON_MODE", "full") or "full").strip().lower()
+    return mode if mode in ("full", "organise", "readonly") else "full"
 
 
 class ToolError(Exception):
@@ -505,6 +583,8 @@ def _build_search(args):
         crit += ["SUBJECT", '"%s"' % args["subject"]]
     if args.get("since"):  # DD-Mon-YYYY, e.g. 01-Jul-2026
         crit += ["SINCE", args["since"]]
+    if args.get("before"):
+        crit += ["BEFORE", args["before"]]
     if args.get("text"):
         crit += ["TEXT", '"%s"' % args["text"]]
     if not crit:
@@ -776,7 +856,7 @@ def tool_read_message(args):
 
 
 def _new_message(to, cc, subject, body, in_reply_to=None, references=None,
-                 from_address=None):
+                 from_address=None, attachments=None):
     msg = EmailMessage()
     msg["From"] = from_address or USER
     msg["To"] = to
@@ -790,6 +870,9 @@ def _new_message(to, cc, subject, body, in_reply_to=None, references=None,
         msg["In-Reply-To"] = in_reply_to
         msg["References"] = references or in_reply_to
     msg.set_content(body or "")
+    for att in attachments or []:
+        msg.add_attachment(att["data"], maintype=att["maintype"],
+                           subtype=att["subtype"], filename=att["name"])
     return msg
 
 
@@ -820,18 +903,76 @@ def _describe(conn, folder, uid):
     return "uid %s  (not found in '%s')" % (uid, folder)
 
 
-def _preview(msg, limit=700):
+def _preview(msg, limit=700, files=None):
     try:
         body = msg.get_content()
     except Exception:
         body = ""
     if len(body) > limit:
         body = body[:limit] + "\n[... %d more characters ...]" % (len(body) - limit)
-    return ["From:    %s" % (msg["From"] or ""),
-            "To:      %s" % (msg["To"] or ""),
-            "Cc:      %s" % (msg["Cc"] or "(none)"),
-            "Subject: %s" % (msg["Subject"] or ""),
-            "", body]
+    lines = ["From:    %s" % (msg["From"] or ""),
+             "To:      %s" % (msg["To"] or ""),
+             "Cc:      %s" % (msg["Cc"] or "(none)"),
+             "Subject: %s" % (msg["Subject"] or "")]
+    for att in files or []:
+        lines.append("Attach:  %s (%d bytes) from %s"
+                     % (att["name"], att["size"], att["path"]))
+    return lines + ["", body]
+
+
+def _attach_roots():
+    """Directories a file may be attached from. Defaults to the attachments
+    directory, so anything saved out of a message can be sent straight back."""
+    raw = _cfg("PROTON_ATTACH_SOURCE_DIRS")
+    roots = [os.path.realpath(os.path.expanduser(r.strip()))
+             for r in raw.split(",") if r.strip()]
+    return roots or [os.path.realpath(ATTACH_DIR)]
+
+
+def _resolve_source(path):
+    """Attaching a file means reading the disk and mailing the result, which is
+    the neatest exfiltration route there is. Sources are therefore confined the
+    same way writes are, and widening that is a deliberate act by the user."""
+    resolved = os.path.realpath(os.path.expanduser(str(path)))
+    roots = _attach_roots()
+    if not any(resolved == r or resolved.startswith(r + os.sep) for r in roots):
+        raise ToolError(
+            "Refusing to attach '%s'.\n  resolved to : %s\n  allowed from: %s\n\n"
+            "Files can only be attached from the directories above, because "
+            "reading any file on the machine and mailing it is exactly how data "
+            "walks out. Add a directory to PROTON_ATTACH_SOURCE_DIRS if you want "
+            "it available."
+            % (path, resolved, ", ".join(roots)))
+    if not os.path.isfile(resolved):
+        raise ToolError("'%s' is not a file." % resolved)
+    return resolved
+
+
+def _load_attachments(args):
+    paths = args.get("attach") or []
+    if isinstance(paths, str):
+        paths = [p for p in re.split(r"[,\n]+", paths) if p.strip()]
+    if not paths:
+        return []
+    if len(paths) > MAX_OUTGOING_FILES:
+        raise ToolError("%d files exceeds the %d-per-message limit."
+                        % (len(paths), MAX_OUTGOING_FILES))
+    loaded, total = [], 0
+    for path in paths:
+        resolved = _resolve_source(path)
+        with open(resolved, "rb") as f:
+            data = f.read()
+        total += len(data)
+        if total > MAX_OUTGOING_BYTES:
+            raise ToolError("Attachments total more than the %d MB limit. Most "
+                            "servers reject large mail anyway."
+                            % (MAX_OUTGOING_BYTES // 1048576))
+        ctype, _ = mimetypes.guess_type(resolved)
+        maintype, _, subtype = (ctype or "application/octet-stream").partition("/")
+        loaded.append({"name": os.path.basename(resolved), "data": data,
+                       "maintype": maintype, "subtype": subtype or "octet-stream",
+                       "path": resolved, "size": len(data)})
+    return loaded
 
 
 def _reply_targets(msg, reply_all):
@@ -912,18 +1053,19 @@ def _do_reply(args, reply_all):
     refs = (msg.get("References") or "").split()
     if mid and mid not in refs:
         refs.append(mid)
+    files = _load_attachments(args)
     text = body + (_quoted(raw) if args.get("quote", True) else "")
     reply = _new_message(to, cc, args.get("subject") or _reply_subject(msg), text,
                          in_reply_to=mid or None,
                          references=" ".join(refs[-20:]) or None,
-                         from_address=from_address)
+                         from_address=from_address, attachments=files)
 
     note = ("\n  (alias mail, sent from %s so the alias stays masked)" % from_address
             if aliased and from_address else "")
     if args.get("dry_run"):
         return _dry("%s uid %s" % ("save a draft reply to" if as_draft
                                    else "send this reply to", uid),
-                    _preview(reply) + ([note.strip()] if note else []))
+                    _preview(reply, files=files) + ([note.strip()] if note else []))
     if as_draft:
         conn = imap_connect()
         try:
@@ -958,11 +1100,13 @@ def tool_create_draft(args):
     cc = args.get("cc", "")
     subject = args.get("subject", "")
     body = args.get("body", "")
+    files = _load_attachments(args)
     msg = _new_message(to, cc, subject, body,
                        in_reply_to=args.get("in_reply_to"),
-                       references=args.get("references"))
+                       references=args.get("references"),
+                       from_address=args.get("from_address"), attachments=files)
     if args.get("dry_run"):
-        return _dry("save this draft", _preview(msg))
+        return _dry("save this draft", _preview(msg, files=files))
     conn = imap_connect()
     try:
         drafts = _find_drafts_folder(conn)
@@ -1007,12 +1151,13 @@ def tool_update_draft(args):
         old.get("From") or "")[1] or None
     _check_sender(from_address)
     _check_recipients(to, cc)
+    files = _load_attachments(args)
     new = _new_message(to, cc, subject, body,
                        in_reply_to=old.get("In-Reply-To"),
                        references=old.get("References"),
-                       from_address=from_address)
+                       from_address=from_address, attachments=files)
     if args.get("dry_run"):
-        return _dry("replace draft uid %s" % uid, _preview(new))
+        return _dry("replace draft uid %s" % uid, _preview(new, files=files))
 
     conn = imap_connect()
     try:
@@ -1349,13 +1494,14 @@ def tool_send(args):
     from_address = args.get("from_address")
     _check_sender(from_address)
     _check_recipients(to, args.get("cc", ""))
+    files = _load_attachments(args)
     msg = _new_message(to, args.get("cc", ""), args.get("subject", ""),
                        args.get("body", ""),
                        in_reply_to=args.get("in_reply_to"),
                        references=args.get("references"),
-                       from_address=from_address)
+                       from_address=from_address, attachments=files)
     if args.get("dry_run"):
-        return _dry("send this message", _preview(msg))
+        return _dry("send this message", _preview(msg, files=files))
     _smtp_send(msg)
     return "Sent from %s to %s (subject: %s)." % (
         from_address or USER, to, args.get("subject", ""))
@@ -2050,6 +2196,114 @@ def tool_bulk_move(args):
     return _bulk(args, "move to '%s'" % dest, one)
 
 
+def _mailbox_head(conn, folder):
+    typ, data = conn.status(_folder_quote(folder), "(UIDNEXT)")
+    if typ != "OK" or not data or not data[0]:
+        raise ToolError("Cannot read UIDNEXT for '%s'." % folder)
+    m = re.search(r"UIDNEXT\s+(\d+)", data[0].decode("utf-8", "replace"))
+    if not m:
+        raise ToolError("Unexpected STATUS response for '%s'." % folder)
+    return int(m.group(1)) - 1
+
+
+def tool_poll_mailbox(args):
+    """Messages that have arrived since the last poll.
+
+    The first poll on a mailbox deliberately emits nothing. It records where the
+    mailbox currently ends, so switching this on does not immediately replay
+    years of backlog. The cursor stores UIDVALIDITY beside the uid, because if
+    the mailbox is resynced every remembered uid points somewhere else, and the
+    only safe move is to start again from the new head rather than guess.
+
+    Nothing is marked read. Pass advance=false to look without committing, then
+    confirm with ack_mailbox once the batch is genuinely handled."""
+    folder = args.get("folder", "INBOX")
+    limit = max(1, min(int(args.get("limit", 20)), 100))
+    advance = args.get("advance", True)
+    conn = imap_connect()
+    try:
+        validity = _select_checked(conn, folder, None)
+        head = _mailbox_head(conn, folder)
+        state = _read_state()
+        cursor = (state.get("cursors") or {}).get(folder)
+
+        if not cursor or str(cursor.get("uidvalidity")) != str(validity):
+            why = ("First poll of '%s'" % folder if not cursor else
+                   "'%s' was resynced, so every remembered uid is meaningless "
+                   "now" % folder)
+            state.setdefault("cursors", {})[folder] = {
+                "uidvalidity": validity, "last_uid": head}
+            _write_state(state)
+            return ("%s. Nothing emitted; the cursor is set to the current end "
+                    "of the mailbox (uid %d, uidvalidity %s). The next poll "
+                    "returns whatever arrives from here on."
+                    % (why, head, validity))
+
+        last = int(cursor.get("last_uid", 0))
+        if head <= last:
+            return "Nothing new in '%s' since uid %d." % (folder, last)
+        typ, data = conn.uid("SEARCH", None, "UID", "%d:*" % (last + 1))
+        fresh = sorted(int(u) for u in (data[0].split() if typ == "OK" and data
+                                        and data[0] else []) if int(u) > last)
+        if not fresh:
+            return "Nothing new in '%s' since uid %d." % (folder, last)
+        batch, more = fresh[:limit], max(0, len(fresh) - limit)
+        rows = []
+        for uid in batch:
+            typ, md = conn.uid("FETCH", str(uid),
+                               "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+            if typ != "OK" or not md or md[0] is None:
+                continue
+            env = _parse_envelope(md[0][1])
+            rows.append("[uid %d] %s\n    from: %s\n    date: %s"
+                        % (uid, env["subject"] or "(no subject)", env["from"],
+                           env["date"]))
+        checkpoint = "%s:%d" % (validity, batch[-1])
+        if advance:
+            state.setdefault("cursors", {})[folder] = {
+                "uidvalidity": validity, "last_uid": batch[-1]}
+            _write_state(state)
+            tail = "Cursor advanced to uid %d." % batch[-1]
+        else:
+            tail = ("Cursor NOT moved. Call ack_mailbox with checkpoint '%s' "
+                    "once these are handled; until then another poll returns "
+                    "the same batch." % checkpoint)
+        return ("%d new message(s) in '%s'%s:\n\n%s\n\n%s"
+                % (len(rows), folder,
+                   ", %d more waiting" % more if more else "",
+                   "\n\n".join(rows), tail))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def tool_ack_mailbox(args):
+    """Commit a checkpoint from poll_mailbox. Safe to repeat."""
+    folder = args.get("folder", "INBOX")
+    checkpoint = str(args.get("checkpoint", "")).strip()
+    validity, _, uid = checkpoint.partition(":")
+    if not validity or not uid.isdigit():
+        raise ToolError("checkpoint should look like '<uidvalidity>:<uid>', "
+                        "exactly as poll_mailbox reported it.")
+    state = _read_state()
+    cursor = (state.get("cursors") or {}).get(folder) or {}
+    if cursor and str(cursor.get("uidvalidity")) != validity:
+        raise ToolError(
+            "That checkpoint is for uidvalidity %s but the cursor for '%s' is "
+            "on %s. The mailbox was resynced in between, so the checkpoint no "
+            "longer refers to anything. Poll again."
+            % (validity, folder, cursor.get("uidvalidity")))
+    if int(cursor.get("last_uid", 0)) >= int(uid):
+        return ("Already at uid %s or beyond for '%s'. Nothing to do."
+                % (uid, folder))
+    state.setdefault("cursors", {})[folder] = {"uidvalidity": validity,
+                                               "last_uid": int(uid)}
+    _write_state(state)
+    return "Cursor for '%s' committed at uid %s." % (folder, uid)
+
+
 def tool_folder_status(args):
     """Counts plus the UIDVALIDITY that every uid in this folder depends on."""
     folder = args.get("folder", "INBOX")
@@ -2131,6 +2385,36 @@ TOOLS = [
         "handler": tool_folder_status,
     },
     {
+        "name": "poll_mailbox",
+        "description": "Messages that have arrived since the last poll. The very "
+                       "first poll emits nothing and just records where the "
+                       "mailbox ends, so turning this on does not replay the "
+                       "backlog. Marks nothing as read.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string", "description": "Default INBOX."},
+                "limit": {"type": "integer", "description": "Most per call, 1 to 100 (default 20)."},
+                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with ack_mailbox."},
+            },
+        },
+        "handler": tool_poll_mailbox,
+    },
+    {
+        "name": "ack_mailbox",
+        "description": "Commit a checkpoint returned by poll_mailbox with "
+                       "advance=false. Repeating it is harmless.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string", "description": "Default INBOX."},
+                "checkpoint": {"type": "string", "description": "Exactly as poll_mailbox reported it."},
+            },
+            "required": ["checkpoint"],
+        },
+        "handler": tool_ack_mailbox,
+    },
+    {
         "name": "search_mail",
         "description": "Search a folder. Combine any of: text, from, subject, "
                        "since (DD-Mon-YYYY), unread_only, flagged_only. Returns "
@@ -2143,6 +2427,7 @@ TOOLS = [
                 "from": {"type": "string"},
                 "subject": {"type": "string"},
                 "since": {"type": "string", "description": "DD-Mon-YYYY, e.g. 01-Jul-2026"},
+                "before": {"type": "string", "description": "DD-Mon-YYYY. Combine with since for a date range."},
                 "unread_only": {"type": "boolean"},
                 "flagged_only": {"type": "boolean"},
                 "limit": {"type": "integer", "description": "Max results (default 15)."},
@@ -2163,6 +2448,7 @@ TOOLS = [
                 "from": {"type": "string"},
                 "subject": {"type": "string"},
                 "since": {"type": "string", "description": "DD-Mon-YYYY."},
+                "before": {"type": "string", "description": "DD-Mon-YYYY. Combine with since for a date range."},
                 "unread_only": {"type": "boolean"},
                 "flagged_only": {"type": "boolean"},
                 "limit": {"type": "integer", "description": "Most recent N (default 25)."},
@@ -2366,6 +2652,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "attach": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path. Only from the allowed source directories."},
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
@@ -2389,6 +2676,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "attach": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path. Only from the allowed source directories."},
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
@@ -2412,6 +2700,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "attach": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path. Only from the allowed source directories."},
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "to": {"type": "string"},
                 "cc": {"type": "string"},
@@ -2432,6 +2721,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "attach": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path. Only from the allowed source directories."},
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY of the folder; refuses on mismatch."},
@@ -2575,6 +2865,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "attach": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path. Only from the allowed source directories."},
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "to": {"type": "string"},
                 "cc": {"type": "string"},
@@ -2612,14 +2903,16 @@ TOOLS = [
     },
 ]
 
+MODE = _mode()
 _MUTATING = {"send", "forward", "create_draft", "create_mailbox",
              "move_to_folder", "apply_label", "mark", "save_attachment",
              "bulk_mark", "bulk_apply_label", "bulk_move", "reply", "reply_all",
              "update_draft", "delete_draft", "send_draft", "unsubscribe"}
-if READONLY:
-    # Absolute guarantee: a tool that isn't registered cannot be invoked,
-    # no matter what an injected instruction asks for.
+if MODE == "readonly":
     TOOLS = [t for t in TOOLS if t["name"] not in _MUTATING]
+elif MODE == "organise":
+    # Everything except putting mail on the wire.
+    TOOLS = [t for t in TOOLS if t["name"] not in _ORGANISE_ONLY]
 
 HANDLERS = {t["name"]: t["handler"] for t in TOOLS}
 TOOL_DEFS = [{k: t[k] for k in ("name", "description", "inputSchema")} for t in TOOLS]
@@ -2674,6 +2967,8 @@ def handle(req):
         # added later cannot forget to log.
         audited = name in _MUTATING
         try:
+            if audited and not args.get("dry_run"):
+                _rate_check(name)
             out = handler(args)
             content = out if isinstance(out, list) else [
                 {"type": "text", "text": out}]
