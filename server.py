@@ -275,6 +275,41 @@ def _special_folder(conn, kind):
                     "list_folders and pass an explicit folder name." % kind)
 
 
+def _uidvalidity(conn):
+    """Current UIDVALIDITY of the selected mailbox. imaplib clears untagged
+    responses on select(), so this always reflects the mailbox just opened."""
+    try:
+        typ, data = conn.response("UIDVALIDITY")
+        if data and data[0]:
+            return data[0].decode("ascii", "replace").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _select_checked(conn, folder, expected=None, readonly=True):
+    """Open a mailbox and refuse to act on stale UIDs.
+
+    An IMAP UID only means anything within one UIDVALIDITY generation. If the
+    mailbox is resynced that number changes and every previously-noted UID
+    silently refers to a different message, which is how the wrong mail gets
+    filed or trashed. Callers pass back the uidvalidity they were given and we
+    verify it still holds."""
+    typ, _ = conn.select(_folder_quote(folder), readonly=readonly)
+    if typ != "OK":
+        raise ToolError("Cannot open folder '%s'. Run list_folders for exact names."
+                        % folder)
+    current = _uidvalidity(conn)
+    if expected and current and str(expected).strip() != current:
+        raise ToolError(
+            "UIDVALIDITY mismatch on '%s' (expected %s, mailbox is now %s).\n\n"
+            "The mailbox was resynced, so every UID you hold refers to a "
+            "different message now. Re-run search_mail or find_thread to get "
+            "fresh UIDs before acting. Nothing was changed."
+            % (folder, expected, current))
+    return current
+
+
 def _parse_envelope(msg_bytes):
     msg = email.message_from_bytes(msg_bytes)
     return {
@@ -381,9 +416,7 @@ def tool_search_mail(args):
     limit = int(args.get("limit", 15))
     conn = imap_connect()
     try:
-        typ, _ = conn.select(_folder_quote(folder), readonly=True)
-        if typ != "OK":
-            raise ToolError("Cannot open folder '%s'. Try list_folders." % folder)
+        validity = _select_checked(conn, folder, args.get("uidvalidity"))
         crit = _build_search(args)
         typ, data = conn.uid("SEARCH", None, *crit)
         if typ != "OK":
@@ -415,8 +448,9 @@ def tool_search_mail(args):
                 env["from"], env["date"], flags))
         if not rows:
             return "No messages matched in '%s'." % folder
-        return "%d message(s) in '%s' (newest first):\n\n%s" % (
-            len(rows), folder, "\n\n".join(rows))
+        return ("%d message(s) in '%s' (uidvalidity %s \u2014 pass this back with "
+                "any uid to guard against a resync):\n\n%s"
+                % (len(rows), folder, validity or "unknown", "\n\n".join(rows)))
     finally:
         try:
             conn.logout()
@@ -429,9 +463,7 @@ def tool_read_message(args):
     uid = str(args["uid"])
     conn = imap_connect()
     try:
-        typ, _ = conn.select(_folder_quote(folder), readonly=True)
-        if typ != "OK":
-            raise ToolError("Cannot open folder '%s'." % folder)
+        _select_checked(conn, folder, args.get("uidvalidity"))
         typ, md = conn.uid("FETCH", uid, "(BODY.PEEK[])")
         if typ != "OK" or not md or md[0] is None:
             raise ToolError("Message uid %s not found in '%s'." % (uid, folder))
@@ -528,9 +560,7 @@ def tool_mark(args):
     op, flag = mapping[action]
     conn = imap_connect()
     try:
-        typ, _ = conn.select(_folder_quote(folder))
-        if typ != "OK":
-            raise ToolError("Cannot open folder '%s'." % folder)
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=False)
         typ, resp = conn.uid("STORE", uid, op, flag)
         if typ != "OK":
             raise ToolError("Flag update failed: %s" % resp)
@@ -550,9 +580,7 @@ def tool_apply_label(args):
     target = label if label.startswith("Labels/") else "Labels/%s" % label
     conn = imap_connect()
     try:
-        typ, _ = conn.select(_folder_quote(folder))
-        if typ != "OK":
-            raise ToolError("Cannot open folder '%s'." % folder)
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=False)
         typ, resp = conn.uid("COPY", uid, _folder_quote(target))
         if typ != "OK":
             raise ToolError("Label COPY to '%s' failed: %s. Does the label "
@@ -572,9 +600,7 @@ def tool_move_to_folder(args):
     dest = args["to_folder"]
     conn = imap_connect()
     try:
-        typ, _ = conn.select(_folder_quote(folder))
-        if typ != "OK":
-            raise ToolError("Cannot open source folder '%s'." % folder)
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=False)
         # Prefer UID MOVE (RFC 6851); fall back to COPY + delete + expunge.
         try:
             typ, resp = conn.uid("MOVE", uid, _folder_quote(dest))
@@ -617,8 +643,9 @@ def tool_send(args):
     to = args.get("to", "")
     if not to:
         raise ToolError("'to' is required.")
-    _check_recipients(to, args.get("cc", ""))
     from_address = args.get("from_address")
+    _check_sender(from_address)
+    _check_recipients(to, args.get("cc", ""))
     msg = _new_message(to, args.get("cc", ""), args.get("subject", ""),
                        args.get("body", ""),
                        in_reply_to=args.get("in_reply_to"),
@@ -639,13 +666,12 @@ def tool_forward(args):
     to = args.get("to", "")
     if not to:
         raise ToolError("'to' is required.")
+    _check_sender(args.get("from_address"))
     _check_recipients(to)
     note = args.get("note", "")
     conn = imap_connect()
     try:
-        typ, _ = conn.select(_folder_quote(folder), readonly=True)
-        if typ != "OK":
-            raise ToolError("Cannot open folder '%s'." % folder)
+        _select_checked(conn, folder, args.get("uidvalidity"))
         typ, md = conn.uid("FETCH", uid, "(BODY.PEEK[])")
         if typ != "OK" or not md or md[0] is None:
             raise ToolError("Message uid %s not found." % uid)
@@ -711,6 +737,31 @@ def _taint_text(text):
         addr = addr.lower()
         if addr not in _CORRESPONDENTS:
             _TAINTED.add(addr)
+
+
+def allowed_senders():
+    """Addresses this server may send AS. Defaults to the configured user plus
+    the alias-owner address, so `from_address` cannot be pointed anywhere else
+    by an injected instruction. Widen deliberately via PROTON_ALLOWED_SENDERS."""
+    allowed = {a.lower() for a in (USER, ALIAS_FROM) if a}
+    extra = _cfg("PROTON_ALLOWED_SENDERS")
+    allowed |= {x.strip().lower() for x in extra.split(",") if x.strip()}
+    return allowed
+
+
+def _check_sender(address):
+    if not address:
+        return
+    addr = (email.utils.parseaddr(address)[1] or address).lower()
+    allowed = allowed_senders()
+    if addr not in allowed:
+        raise ToolError(
+            "BLOCKED \u2014 refusing to send as '%s'.\n\n"
+            "That address is not on this server's sender allowlist, so an "
+            "injected instruction cannot make mail appear to come from an "
+            "arbitrary address. Permitted: %s\n"
+            "To add one, the user sets PROTON_ALLOWED_SENDERS (config, outside "
+            "model control)." % (addr, ", ".join(sorted(allowed)) or "(none)"))
 
 
 def _allowed_recipients():
@@ -848,10 +899,8 @@ def _iter_attachments(raw):
     return out
 
 
-def _fetch_raw(conn, folder, uid):
-    typ, _ = conn.select(_folder_quote(folder), readonly=True)
-    if typ != "OK":
-        raise ToolError("Cannot open folder '%s'." % folder)
+def _fetch_raw(conn, folder, uid, expected_validity=None):
+    _select_checked(conn, folder, expected_validity)
     typ, md = conn.uid("FETCH", uid, "(BODY.PEEK[])")
     if typ != "OK" or not md or md[0] is None:
         raise ToolError("Message uid %s not found in '%s'." % (uid, folder))
@@ -1115,6 +1164,28 @@ def tool_purge_attachments(args):
             "Files under persist/ were kept." % (n, os.path.realpath(ATTACH_DIR)))
 
 
+def tool_folder_status(args):
+    """Counts plus the UIDVALIDITY that every uid in this folder depends on."""
+    folder = args.get("folder", "INBOX")
+    conn = imap_connect()
+    try:
+        typ, data = conn.status(_folder_quote(folder),
+                                "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)")
+        if typ != "OK" or not data or not data[0]:
+            raise ToolError("Cannot read status for '%s'. Try list_folders." % folder)
+        raw = data[0].decode("utf-8", "replace")
+        vals = dict(re.findall(r"(MESSAGES|UNSEEN|UIDNEXT|UIDVALIDITY)\s+(\d+)", raw))
+        return ("%s\n  messages    %s\n  unread      %s\n  uidnext     %s\n"
+                "  uidvalidity %s  (pass this with any uid from this folder)"
+                % (folder, vals.get("MESSAGES", "?"), vals.get("UNSEEN", "?"),
+                   vals.get("UIDNEXT", "?"), vals.get("UIDVALIDITY", "?")))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
 def tool_create_mailbox(args):
     """Create a label or folder. GATED — it changes mailbox structure, and the
     request may originate from untrusted email content."""
@@ -1161,6 +1232,17 @@ TOOLS = [
         "handler": tool_list_folders,
     },
     {
+        "name": "folder_status",
+        "description": "Message counts plus UIDNEXT and UIDVALIDITY for a folder. "
+                       "UIDs are only valid within one UIDVALIDITY generation, so "
+                       "check this before acting on uids noted earlier.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"folder": {"type": "string", "description": "Default INBOX."}},
+        },
+        "handler": tool_folder_status,
+    },
+    {
         "name": "search_mail",
         "description": "Search a folder. Combine any of: text, from, subject, "
                        "since (DD-Mon-YYYY), unread_only, flagged_only. Returns "
@@ -1176,6 +1258,7 @@ TOOLS = [
                 "unread_only": {"type": "boolean"},
                 "flagged_only": {"type": "boolean"},
                 "limit": {"type": "integer", "description": "Max results (default 15)."},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
             },
         },
         "handler": tool_search_mail,
@@ -1188,6 +1271,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
             },
             "required": ["uid"],
@@ -1204,6 +1288,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "include_inline": {"type": "boolean", "description": "Also list inline images / PGP keys."},
             },
@@ -1220,6 +1305,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "filename": {"type": "string", "description": "Which attachment (partial match OK). Optional if there is only one."},
             },
@@ -1236,6 +1322,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "filename": {"type": "string", "description": "Partial match; omit to save all documents."},
                 "dest_dir": {"type": "string", "description": "Sub-path under the attachments dir. Writes outside it are refused."},
@@ -1296,6 +1383,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
             },
@@ -1311,6 +1399,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "label": {"type": "string", "description": "Label name, e.g. 'Receipts' or 'Labels/Receipts'."},
             },
@@ -1326,6 +1415,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "to_folder": {"type": "string"},
             },
@@ -1379,6 +1469,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "to": {"type": "string"},
                 "note": {"type": "string", "description": "Optional note added above the forwarded content."},

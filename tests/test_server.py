@@ -124,6 +124,73 @@ class Exfiltration(unittest.TestCase):
         server._check_recipients("someone-new@example.com")  # must not raise
 
 
+class SenderAllowlist(unittest.TestCase):
+    """from_address must not be pointable at an arbitrary address."""
+
+    def setUp(self):
+        self._user, self._alias = server.USER, server.ALIAS_FROM
+        server.USER, server.ALIAS_FROM = "me@example.com", "me@pm.example"
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+
+    def tearDown(self):
+        server.USER, server.ALIAS_FROM = self._user, self._alias
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+
+    def test_configured_user_is_allowed(self):
+        server._check_sender("me@example.com")
+
+    def test_alias_owner_is_allowed(self):
+        server._check_sender("me@pm.example")
+
+    def test_arbitrary_address_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._check_sender("ceo@victim.example")
+
+    def test_display_name_does_not_smuggle_it_through(self):
+        with self.assertRaises(server.ToolError):
+            server._check_sender("Me <ceo@victim.example>")
+
+    def test_empty_means_default_sender(self):
+        server._check_sender("")
+
+    def test_allowlist_widens_it(self):
+        os.environ["PROTON_ALLOWED_SENDERS"] = "extra@example.com"
+        server._check_sender("extra@example.com")
+
+
+class UidValidity(unittest.TestCase):
+    """A UID only means anything inside one UIDVALIDITY generation."""
+
+    class FakeConn:
+        def __init__(self, validity):
+            self._v = validity
+        def select(self, mailbox, readonly=False):
+            return "OK", [b"1"]
+        def response(self, name):
+            return name, [self._v.encode()]
+
+    def test_matching_validity_passes(self):
+        got = server._select_checked(self.FakeConn("111"), "INBOX", "111")
+        self.assertEqual(got, "111")
+
+    def test_mismatch_is_refused(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server._select_checked(self.FakeConn("222"), "INBOX", "111")
+        self.assertIn("UIDVALIDITY", str(cm.exception))
+        self.assertIn("Nothing was changed", str(cm.exception))
+
+    def test_omitting_it_still_works(self):
+        got = server._select_checked(self.FakeConn("333"), "INBOX", None)
+        self.assertEqual(got, "333")
+
+    def test_unopenable_folder_raises(self):
+        class Bad(self.FakeConn):
+            def select(self, mailbox, readonly=False):
+                return "NO", [b"nope"]
+        with self.assertRaises(server.ToolError):
+            server._select_checked(Bad("1"), "Nope", None)
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()
