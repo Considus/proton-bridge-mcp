@@ -570,6 +570,40 @@ def _find_drafts_folder(conn):
         return "Drafts"
 
 
+def _dry(action, lines):
+    return ("DRY RUN, nothing changed.\nWould %s:\n%s"
+            % (action, "\n".join("  " + l for l in lines if l is not None)))
+
+
+def _describe(conn, folder, uid):
+    """Resolve a uid to something a person can recognise. A dry run that only
+    echoes the number back tells you nothing about which message it is."""
+    try:
+        typ, md = conn.uid("FETCH", uid,
+                           "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+        if typ == "OK" and md and md[0] is not None:
+            env = _parse_envelope(md[0][1])
+            return "uid %s  \"%s\"  from %s" % (
+                uid, env["subject"] or "(no subject)", env["from"] or "(unknown)")
+    except Exception:
+        pass
+    return "uid %s  (not found in '%s')" % (uid, folder)
+
+
+def _preview(msg, limit=700):
+    try:
+        body = msg.get_content()
+    except Exception:
+        body = ""
+    if len(body) > limit:
+        body = body[:limit] + "\n[... %d more characters ...]" % (len(body) - limit)
+    return ["From:    %s" % (msg["From"] or ""),
+            "To:      %s" % (msg["To"] or ""),
+            "Cc:      %s" % (msg["Cc"] or "(none)"),
+            "Subject: %s" % (msg["Subject"] or ""),
+            "", body]
+
+
 def _reply_targets(msg, reply_all):
     """Who a reply goes to. Reply-To beats From, which is what makes replies to
     SimpleLogin aliases land on the reverse-alias rather than unmasking you."""
@@ -597,13 +631,17 @@ def _quoted(raw, limit=4000):
     body = _extract_body(raw, limit)
     head = "On %s, %s wrote:" % (env["date"] or "an earlier date",
                                  env["from"] or "they")
+    # HTML-derived bodies arrive full of blank lines; quoting them verbatim
+    # produces a wall of empty "> " markers.
+    tidy = re.sub(r"\n{3,}", "\n\n", "\n".join(
+        l.rstrip() for l in body.splitlines())).strip()
     return "\n\n" + head + "\n" + "\n".join(
-        "> " + line for line in body.splitlines())
+        (">" if not l else "> " + l) for l in tidy.splitlines())
 
 
 def _do_reply(args, reply_all):
     as_draft = bool(args.get("draft"))
-    if not as_draft and not args.get("confirmed"):
+    if not as_draft and not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError(
             "Refusing to send a reply without confirmed=true. Either pass "
             "draft=true to save it for review instead, or show the user the "
@@ -652,6 +690,10 @@ def _do_reply(args, reply_all):
 
     note = ("\n  (alias mail, sent from %s so the alias stays masked)" % from_address
             if aliased and from_address else "")
+    if args.get("dry_run"):
+        return _dry("%s uid %s" % ("save a draft reply to" if as_draft
+                                   else "send this reply to", uid),
+                    _preview(reply) + ([note.strip()] if note else []))
     if as_draft:
         conn = imap_connect()
         try:
@@ -689,6 +731,8 @@ def tool_create_draft(args):
     msg = _new_message(to, cc, subject, body,
                        in_reply_to=args.get("in_reply_to"),
                        references=args.get("references"))
+    if args.get("dry_run"):
+        return _dry("save this draft", _preview(msg))
     conn = imap_connect()
     try:
         drafts = _find_drafts_folder(conn)
@@ -720,7 +764,11 @@ def tool_mark(args):
     op, flag = mapping[action]
     conn = imap_connect()
     try:
-        _select_checked(conn, folder, args.get("uidvalidity"), readonly=False)
+        dry = bool(args.get("dry_run"))
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=dry)
+        if dry:
+            return _dry("mark as '%s'" % action,
+                        [_describe(conn, folder, uid), "in '%s'" % folder])
         typ, resp = conn.uid("STORE", uid, op, flag)
         if typ != "OK":
             raise ToolError("Flag update failed: %s" % resp)
@@ -740,7 +788,11 @@ def tool_apply_label(args):
     target = label if label.startswith("Labels/") else "Labels/%s" % label
     conn = imap_connect()
     try:
-        _select_checked(conn, folder, args.get("uidvalidity"), readonly=False)
+        dry = bool(args.get("dry_run"))
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=dry)
+        if dry:
+            return _dry("apply label '%s'" % target,
+                        [_describe(conn, folder, uid), "currently in '%s'" % folder])
         typ, resp = conn.uid("COPY", uid, _folder_quote(target))
         if typ != "OK":
             raise ToolError("Label COPY to '%s' failed: %s. Does the label "
@@ -760,7 +812,11 @@ def tool_move_to_folder(args):
     dest = args["to_folder"]
     conn = imap_connect()
     try:
-        _select_checked(conn, folder, args.get("uidvalidity"), readonly=False)
+        dry = bool(args.get("dry_run"))
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=dry)
+        if dry:
+            return _dry("move to '%s'" % dest,
+                        [_describe(conn, folder, uid), "currently in '%s'" % folder])
         # Prefer UID MOVE (RFC 6851); fall back to COPY + delete + expunge.
         try:
             typ, resp = conn.uid("MOVE", uid, _folder_quote(dest))
@@ -796,7 +852,7 @@ def _smtp_send(msg):
 def tool_send(args):
     """Send a new message. The AGENT must confirm recipient/subject/body with
     the user before calling this — there is no unattended send."""
-    if not args.get("confirmed"):
+    if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to send without confirmed=true. The agent "
                         "must show the user the exact To/Subject/Body and get "
                         "an explicit yes, then call again with confirmed=true.")
@@ -811,6 +867,8 @@ def tool_send(args):
                        in_reply_to=args.get("in_reply_to"),
                        references=args.get("references"),
                        from_address=from_address)
+    if args.get("dry_run"):
+        return _dry("send this message", _preview(msg))
     _smtp_send(msg)
     return "Sent from %s to %s (subject: %s)." % (
         from_address or USER, to, args.get("subject", ""))
@@ -818,7 +876,7 @@ def tool_send(args):
 
 def tool_forward(args):
     """Forward an existing message on demand. Agent must confirm first."""
-    if not args.get("confirmed"):
+    if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to forward without confirmed=true. Show the "
                         "user who it goes to and call again with confirmed=true.")
     folder = args.get("folder", "INBOX")
@@ -856,6 +914,8 @@ def tool_forward(args):
                         env["to"], _extract_body(md[0][1])))
     fwd.add_attachment(original.as_bytes(), maintype="message",
                        subtype="rfc822", filename="original.eml")
+    if args.get("dry_run"):
+        return _dry("forward uid %s" % uid, _preview(fwd))
     _smtp_send(fwd)
     return "Forwarded uid %s to %s." % (uid, to)
 
@@ -1192,6 +1252,10 @@ def tool_save_attachment(args):
         os.makedirs(dest, exist_ok=True)
     except Exception as e:
         raise ToolError("Cannot create '%s': %s" % (dest, e))
+    if args.get("dry_run"):
+        return _dry("write %d file(s) to %s" % (len(items), dest),
+                    ["%s (%d bytes)" % (_safe_name(a["filename"], uid), a["size"])
+                     for a in items])
     saved, skipped = [], []
     for a in items:
         if a["size"] > MAX_ATTACH_BYTES:
@@ -1321,6 +1385,15 @@ def tool_find_thread(args):
 
 def tool_purge_attachments(args):
     """Delete every non-persisted saved attachment immediately."""
+    root = os.path.realpath(ATTACH_DIR)
+    if args.get("dry_run"):
+        try:
+            names = [f for f in os.listdir(root)
+                     if os.path.isfile(os.path.join(root, f))]
+        except OSError:
+            names = []
+        return _dry("delete %d ephemeral file(s) from %s" % (len(names), root),
+                    names or ["(nothing to delete)"])
     n = _sweep_attachments(force=True)
     return ("Purged %d ephemeral attachment file(s) from %s.\n"
             "Files under persist/ were kept." % (n, os.path.realpath(ATTACH_DIR)))
@@ -1455,7 +1528,7 @@ def tool_folder_status(args):
 def tool_create_mailbox(args):
     """Create a label or folder. GATED — it changes mailbox structure, and the
     request may originate from untrusted email content."""
-    if not args.get("confirmed"):
+    if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to create a mailbox without confirmed=true. "
                         "Show the user the exact name and type, get a yes first.")
     name = (args.get("name") or "").strip()
@@ -1473,7 +1546,9 @@ def tool_create_mailbox(args):
         # Proton namespaces labels/folders; plain IMAP servers don't.
         target = prefix + name if any(f.startswith(prefix) for f in existing) else name
         if target in existing:
-            return "'%s' already exists — nothing to do." % target
+            return "'%s' already exists, nothing to do." % target
+        if args.get("dry_run"):
+            return _dry("create a %s" % kind, ["named '%s'" % target])
         typ, resp = conn.create(_folder_quote(target))
         if typ != "OK":
             raise ToolError("Create failed for '%s': %s" % (target, resp))
@@ -1587,6 +1662,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
@@ -1603,7 +1679,12 @@ TOOLS = [
         "name": "purge_attachments",
         "description": "Immediately delete all ephemeral saved attachments. Call "
                        "after reading a saved file so nothing lingers on disk.",
-        "inputSchema": {"type": "object", "properties": {}},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+            },
+        },
         "handler": tool_purge_attachments,
     },
     {
@@ -1684,6 +1765,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
@@ -1706,6 +1788,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
@@ -1728,6 +1811,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "to": {"type": "string"},
                 "cc": {"type": "string"},
                 "subject": {"type": "string"},
@@ -1745,6 +1829,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
@@ -1761,6 +1846,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
@@ -1777,6 +1863,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
@@ -1794,6 +1881,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "name": {"type": "string", "description": "Name only, no 'Labels/' or 'Folders/' prefix."},
                 "kind": {"type": "string", "enum": ["label", "folder"]},
                 "confirmed": {"type": "boolean"},
@@ -1810,6 +1898,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "to": {"type": "string"},
                 "cc": {"type": "string"},
                 "subject": {"type": "string"},
@@ -1831,6 +1920,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
                 "uid": {"type": "string"},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
