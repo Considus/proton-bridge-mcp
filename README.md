@@ -22,6 +22,7 @@ Anything that sends takes `draft=true` instead, which puts it in your Drafts for
 | `read_message` | Full headers and body |
 | `list_attachments` | Real documents, kept apart from inline images and PGP keys |
 | `read_attachment` | Pulls the text out, PDFs included |
+| `view_attachment` | Hands back an image attachment so it can actually be looked at |
 | `save_attachment` | Writes a file out, deleted again after 15 minutes unless you say otherwise |
 | `purge_attachments` | Deletes those files now |
 | `find_thread` | The whole conversation, and which messages carry documents |
@@ -43,6 +44,12 @@ Anything that sends takes `draft=true` instead, which puts it in your Drafts for
 | `forward` | Gated |
 
 Two things it can't do, and won't pretend otherwise. Bridge has no access to Proton's server-side filters or auto-forwarding rules, so those stay a manual job in the Proton web app. And nothing here hard-deletes, the furthest it goes is Trash.
+
+### Getting at attachments
+
+Three ways in, for three different situations. `read_attachment` pulls the text out and is what you want almost always, invoices included, and nothing touches the disk. `save_attachment` writes the file out for anything that isn't text, and works if whatever you're using can read files off disk. `view_attachment` hands an image straight back so it can be looked at, which is the only route to a photo or a scan when the client can't reach the filesystem.
+
+Images only for that last one, on purpose. Encoding a file to send it inline makes it a third bigger and drops it into the conversation as characters, and for a spreadsheet or a Word document that's a lot of context spent on something nothing can read. Images are different because they arrive as an image rather than as text, so they cost about what a picture costs and can actually be seen.
 
 ### Searching everywhere
 

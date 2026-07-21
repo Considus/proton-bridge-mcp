@@ -61,6 +61,42 @@ class Attachments(unittest.TestCase):
         self.assertIn("Body text", server._extract_body(build_message()))
 
 
+class AttachmentPicking(unittest.TestCase):
+    def test_picks_the_only_document(self):
+        att = server._pick_attachment(build_message(), None)
+        self.assertEqual(att["filename"], "invoice.pdf")
+
+    def test_picks_by_partial_name(self):
+        att = server._pick_attachment(build_message(), "invo")
+        self.assertEqual(att["filename"], "invoice.pdf")
+
+    def test_unknown_name_lists_what_is_there(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server._pick_attachment(build_message(), "nope.txt")
+        self.assertIn("invoice.pdf", str(cm.exception))
+
+    def test_inline_images_are_hidden_by_default(self):
+        with self.assertRaises(server.ToolError):
+            server._pick_attachment(build_message(), "logo.png")
+
+    def test_include_inline_exposes_them(self):
+        att = server._pick_attachment(build_message(), "logo.png",
+                                      include_inline=True)
+        self.assertEqual(att["ctype"], "image/png")
+
+    def test_ambiguous_choice_is_refused(self):
+        msg = EmailMessage()
+        msg["From"] = "a@b.example"
+        msg.set_content("x")
+        msg.add_attachment(b"1", maintype="application", subtype="pdf",
+                           filename="one.pdf")
+        msg.add_attachment(b"2", maintype="application", subtype="pdf",
+                           filename="two.pdf")
+        with self.assertRaises(server.ToolError) as cm:
+            server._pick_attachment(msg.as_bytes(), None)
+        self.assertIn("name one", str(cm.exception))
+
+
 class WriteSandbox(unittest.TestCase):
     """MCP servers get no sandbox from the host, so this IS the sandbox."""
 
