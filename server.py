@@ -1397,23 +1397,53 @@ def tool_mark(args):
             pass
 
 
+def _resolve_label(conn, label):
+    """Work out what mailbox a label name actually refers to.
+
+    Proton namespaces labels under Labels/. A plain IMAP server has no such
+    idea, so a label there is just another mailbox and applying one means
+    copying the message into it. Detect which kind of server this is instead of
+    assuming, and say what exists when the name doesn't match anything."""
+    label = (label or "").strip()
+    if not label:
+        raise ToolError("'label' is required.")
+    existing = _list_folders(conn)
+    if label in existing:
+        return label
+    namespaced = [f for f in existing if f.startswith("Labels/")]
+    if namespaced:
+        target = label if label.startswith("Labels/") else "Labels/" + label
+        if target in existing:
+            return target
+        raise ToolError("No label called '%s'. Existing labels: %s. Create it "
+                        "with create_mailbox if it should exist."
+                        % (label, ", ".join(sorted(namespaced))))
+    by_lower = {f.lower(): f for f in existing}
+    if label.lower() in by_lower:
+        return by_lower[label.lower()]
+    raise ToolError(
+        "No mailbox called '%s'. This server has no Labels/ namespace, so a "
+        "label is an ordinary mailbox and the message gets copied into it. "
+        "Existing mailboxes: %s. Create one with create_mailbox first."
+        % (label, ", ".join(sorted(existing)[:25])))
+
+
 def tool_apply_label(args):
-    """Applying a Proton label = COPY into Labels/<name> (message keeps its place)."""
+    """Tag a message. The message stays where it is."""
     folder = args.get("folder", "INBOX")
     uid = str(args["uid"])
-    label = args["label"]
-    target = label if label.startswith("Labels/") else "Labels/%s" % label
     conn = imap_connect()
     try:
         dry = bool(args.get("dry_run"))
         _select_checked(conn, folder, args.get("uidvalidity"), readonly=dry)
+        target = _resolve_label(conn, args["label"])
         if dry:
             return _dry("apply label '%s'" % target,
                         [_describe(conn, folder, uid), "currently in '%s'" % folder])
         typ, resp = conn.uid("COPY", uid, _folder_quote(target))
         if typ != "OK":
-            raise ToolError("Label COPY to '%s' failed: %s. Does the label "
-                            "exist? Try list_folders." % (target, resp))
+            raise ToolError("Copying uid %s into '%s' failed: %s"
+                            % (uid, target, resp))
         return "Applied label '%s' to uid %s." % (target, uid)
     finally:
         try:
@@ -2164,13 +2194,16 @@ def tool_bulk_mark(args):
 
 def tool_bulk_apply_label(args):
     label = args["label"]
-    target = label if label.startswith("Labels/") else "Labels/%s" % label
+    resolved = {}
 
     def one(conn, uid):
-        typ, resp = conn.uid("COPY", uid, _folder_quote(target))
+        # Resolved once, on the batch's own connection.
+        if "target" not in resolved:
+            resolved["target"] = _resolve_label(conn, label)
+        typ, resp = conn.uid("COPY", uid, _folder_quote(resolved["target"]))
         if typ != "OK":
-            raise RuntimeError("label does not exist?")
-    return _bulk(args, "label '%s'" % target, one)
+            raise RuntimeError(resp)
+    return _bulk(args, "label '%s'" % label, one)
 
 
 def tool_bulk_move(args):
@@ -2619,7 +2652,7 @@ TOOLS = [
                 "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
                 "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "label": {"type": "string", "description": "Existing label name."},
+                "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
             },
             "required": ["uids", "label"],
         },
@@ -2808,8 +2841,8 @@ TOOLS = [
     },
     {
         "name": "apply_label",
-        "description": "Apply a Proton label to a message (message stays where "
-                       "it is). Label must already exist in Proton.",
+        "description": "Tag a message with an existing label. The message stays "
+                       "where it is.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2817,7 +2850,7 @@ TOOLS = [
                 "uid": {"type": "string"},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
-                "label": {"type": "string", "description": "Label name, e.g. 'Receipts' or 'Labels/Receipts'."},
+                "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
             },
             "required": ["uid", "label"],
         },
