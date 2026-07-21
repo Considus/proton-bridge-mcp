@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+attachments/
+.env
+*.bak
+*.bak.*
+.DS_Store
+settings.json
