@@ -41,6 +41,7 @@ import ssl
 import subprocess
 import time
 import sys
+import urllib.parse
 from email.message import EmailMessage
 from email.header import decode_header, make_header
 
@@ -902,6 +903,248 @@ def tool_create_draft(args):
             conn.logout()
         except Exception:
             pass
+
+
+def _drafts_folder_of(args, conn):
+    return args.get("folder") or _find_drafts_folder(conn)
+
+
+def tool_update_draft(args):
+    """IMAP has no edit. A draft is replaced by appending the new version and
+    binning the old one, so threading headers are carried across by hand."""
+    uid = str(args["uid"])
+    conn = imap_connect()
+    try:
+        folder = _drafts_folder_of(args, conn)
+        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    old = email.message_from_bytes(raw)
+    to = args.get("to", _decode(old.get("To")) or "")
+    cc = args.get("cc", _decode(old.get("Cc")) or "")
+    subject = args.get("subject", _decode(old.get("Subject")) or "")
+    body = args.get("body")
+    if body is None:
+        body = _extract_body(raw)
+    from_address = args.get("from_address") or email.utils.parseaddr(
+        old.get("From") or "")[1] or None
+    _check_sender(from_address)
+    _check_recipients(to, cc)
+    new = _new_message(to, cc, subject, body,
+                       in_reply_to=old.get("In-Reply-To"),
+                       references=old.get("References"),
+                       from_address=from_address)
+    if args.get("dry_run"):
+        return _dry("replace draft uid %s" % uid, _preview(new))
+
+    conn = imap_connect()
+    try:
+        folder = _drafts_folder_of(args, conn)
+        typ, resp = conn.append(_folder_quote(folder), r"(\Draft)", None,
+                                new.as_bytes())
+        if typ != "OK":
+            raise ToolError("Could not save the replacement draft: %s" % resp)
+        # Only bin the original once the replacement is safely stored.
+        _select_checked(conn, folder, None, readonly=False)
+        trash = _special_folder(conn, "trash")
+        try:
+            typ, _ = conn.uid("MOVE", uid, _folder_quote(trash))
+        except imaplib.IMAP4.error:
+            typ = "NO"
+        if typ != "OK":
+            conn.uid("COPY", uid, _folder_quote(trash))
+            conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+            conn.expunge()
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    return ("Draft replaced in '%s'. The previous version is in Trash.\n  To: %s\n"
+            "  Subject: %s" % (folder, to, subject))
+
+
+def tool_delete_draft(args):
+    """Moves to Trash. Nothing here removes anything permanently."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to delete a draft without confirmed=true. "
+                        "Preview it with dry_run=true first if you are unsure.")
+    uid = str(args["uid"])
+    conn = imap_connect()
+    try:
+        folder = _drafts_folder_of(args, conn)
+        dry = bool(args.get("dry_run"))
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=dry)
+        if dry:
+            return _dry("move this draft to Trash",
+                        [_describe(conn, folder, uid), "from '%s'" % folder])
+        trash = _special_folder(conn, "trash")
+        try:
+            typ, resp = conn.uid("MOVE", uid, _folder_quote(trash))
+        except imaplib.IMAP4.error:
+            typ = "NO"
+        if typ != "OK":
+            typ, resp = conn.uid("COPY", uid, _folder_quote(trash))
+            if typ != "OK":
+                raise ToolError("Could not move the draft to Trash: %s" % resp)
+            conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+            conn.expunge()
+        return "Draft uid %s moved from '%s' to '%s'." % (uid, folder, trash)
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def tool_send_draft(args):
+    """Send a draft as written. The checks run again here, because whatever
+    composed the draft earlier is not necessarily what is asking to send it."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to send a draft without confirmed=true. Use "
+                        "dry_run=true to see exactly what would go out.")
+    uid = str(args["uid"])
+    conn = imap_connect()
+    try:
+        folder = _drafts_folder_of(args, conn)
+        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    msg = email.message_from_bytes(raw)
+    to, cc = _decode(msg.get("To")), _decode(msg.get("Cc"))
+    if not to:
+        raise ToolError("That draft has no recipient.")
+    _check_sender(email.utils.parseaddr(msg.get("From") or "")[1])
+    _check_recipients(to, cc)
+    if args.get("dry_run"):
+        return _dry("send draft uid %s" % uid, _preview(msg))
+    _smtp_send(msg)
+
+    conn = imap_connect()
+    try:
+        folder = _drafts_folder_of(args, conn)
+        _select_checked(conn, folder, None, readonly=False)
+        trash = _special_folder(conn, "trash")
+        try:
+            conn.uid("MOVE", uid, _folder_quote(trash))
+        except imaplib.IMAP4.error:
+            conn.uid("COPY", uid, _folder_quote(trash))
+            conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+            conn.expunge()
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    return ("Draft sent.\n  From: %s\n  To: %s\n  Subject: %s\n"
+            "The draft has been moved to Trash; Proton keeps its own copy in Sent."
+            % (_decode(msg.get("From")), to, _decode(msg.get("Subject"))))
+
+
+_ANGLE_RE = re.compile(r"<([^>]+)>")
+
+
+def tool_unsubscribe(args):
+    """Report how to unsubscribe, and send the email form on request.
+
+    Two deliberate refusals. We never fetch an http unsubscribe URL, because
+    this server only ever talks to Bridge on loopback and quietly reaching out
+    to a host named in a message would both break that and confirm you read it.
+    And when mail arrived through an alias, the subscribed address is the alias,
+    not you, so an unsubscribe sent from your own address usually matches
+    nothing. Disabling the alias is the better answer and is said so."""
+    uid = str(args["uid"])
+    folder = args.get("folder", "INBOX")
+    conn = imap_connect()
+    try:
+        _select_checked(conn, folder, args.get("uidvalidity"))
+        typ, md = conn.uid("FETCH", uid, "(BODY.PEEK[HEADER])")
+        if typ != "OK" or not md or md[0] is None:
+            raise ToolError("Message uid %s not found in '%s'." % (uid, folder))
+        raw = md[0][1]
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+    msg = email.message_from_bytes(raw)
+    _note_headers(msg)
+    header = msg.get("List-Unsubscribe")
+    if not header:
+        raise ToolError("That message has no List-Unsubscribe header, so there "
+                        "is no standard way to unsubscribe from it. Look for a "
+                        "link in the message body, or filter the sender instead.")
+    targets = _ANGLE_RE.findall(header) or [header.strip()]
+    mailtos = [t[len("mailto:"):] for t in targets if t.lower().startswith("mailto:")]
+    urls = [t for t in targets if t.lower().startswith("http")]
+    one_click = "one-click" in (msg.get("List-Unsubscribe-Post") or "").lower()
+
+    sl = msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type") or ""
+    aliased = "forward" in sl.lower()
+    subscribed = (msg.get("X-SimpleLogin-Envelope-To")
+                  or msg.get("X-Simplelogin-Envelope-To")
+                  or _decode(msg.get("To")) or "")
+
+    options = []
+    if urls:
+        options.append("Web:   %s" % "  ".join(urls))
+    if mailtos:
+        options.append("Email: %s" % "  ".join(mailtos))
+    advice = []
+    if urls:
+        advice.append("The web link is not opened for you. This server only talks "
+                      "to Bridge on this machine, and fetching a URL out of a "
+                      "message would break that and confirm you read it. Open it "
+                      "yourself if you want it.")
+    if one_click:
+        advice.append("The sender supports one-click unsubscribe, so the web link "
+                      "should work without a confirmation page.")
+    if aliased:
+        advice.append("This arrived through an alias (%s), so that is the address "
+                      "subscribed, not yours. An unsubscribe sent from your own "
+                      "address will usually match nothing. Disabling the alias "
+                      "stops the mail outright and is the better answer."
+                      % (subscribed or "an alias"))
+
+    if not args.get("send"):
+        return ("Unsubscribe options for uid %s in '%s'\n  %s\n\nNotes\n%s\n\n"
+                "Nothing has been done. Pass send=true with confirmed=true to send "
+                "the email form%s."
+                % (uid, folder, "\n  ".join(options) or "(none parsed)",
+                   "\n".join("  - " + a for a in advice) or "  (none)",
+                   "" if mailtos else ", though this message offers no email option"))
+
+    if not mailtos:
+        raise ToolError("This message offers no mailto: unsubscribe, only a web "
+                        "link, and web links are never fetched for you. Open it "
+                        "yourself: %s" % ", ".join(urls))
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to send an unsubscribe without confirmed=true. "
+                        "Preview it with dry_run=true first.")
+
+    target, _, query = mailtos[0].partition("?")
+    subject = "unsubscribe"
+    for part in query.split("&"):
+        key, _, value = part.partition("=")
+        if key.lower() == "subject" and value:
+            subject = urllib.parse.unquote(value)
+    _CORRESPONDENTS.add(target.lower())  # came from a header, not body content
+    _check_recipients(target)
+    out = _new_message(target, "", subject, "Please unsubscribe this address.")
+    if args.get("dry_run"):
+        return _dry("send an unsubscribe for uid %s" % uid,
+                    _preview(out) + (["", "Caveat: " + advice[-1]] if aliased else []))
+    _smtp_send(out)
+    return ("Unsubscribe request sent to %s (subject: %s).%s"
+            % (target, subject,
+               "\n\nWorth knowing: " + advice[-1] if aliased else ""))
 
 
 def tool_mark(args):
@@ -2015,6 +2258,82 @@ TOOLS = [
         "handler": tool_create_draft,
     },
     {
+        "name": "update_draft",
+        "description": "Replace a draft's contents. Threading headers are carried "
+                       "over, the new version is saved before the old one is binned. "
+                       "Omit a field to keep what the draft already had.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+                "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY of the folder; refuses on mismatch."},
+                "folder": {"type": "string", "description": "Defaults to your Drafts folder."},
+                "to": {"type": "string"},
+                "cc": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "from_address": {"type": "string", "description": "Must be on the sender allowlist."},
+            },
+            "required": ["uid"],
+        },
+        "handler": tool_update_draft,
+    },
+    {
+        "name": "delete_draft",
+        "description": "Move a draft to Trash. GATED. Nothing here deletes "
+                       "permanently.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+                "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY of the folder; refuses on mismatch."},
+                "folder": {"type": "string", "description": "Defaults to your Drafts folder."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["uid"],
+        },
+        "handler": tool_delete_draft,
+    },
+    {
+        "name": "send_draft",
+        "description": "Send a saved draft as written, then move it to Trash. "
+                       "GATED. Sender and recipient checks run again at send time.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+                "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY of the folder; refuses on mismatch."},
+                "folder": {"type": "string", "description": "Defaults to your Drafts folder."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["uid"],
+        },
+        "handler": tool_send_draft,
+    },
+    {
+        "name": "unsubscribe",
+        "description": "Report how to unsubscribe from a message using its "
+                       "List-Unsubscribe header, and optionally send the email "
+                       "form. Reports only unless send=true. Web links are never "
+                       "fetched for you.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+                "uid": {"type": "string"},
+                "folder": {"type": "string", "description": "Default INBOX."},
+                "uidvalidity": {"type": "string"},
+                "send": {"type": "boolean", "description": "Actually send the mailto: unsubscribe. Requires confirmed."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["uid"],
+        },
+        "handler": tool_unsubscribe,
+    },
+    {
         "name": "mark",
         "description": "Mark a message read/unread or star/unstar.",
         "inputSchema": {
@@ -2128,7 +2447,8 @@ TOOLS = [
 
 _MUTATING = {"send", "forward", "create_draft", "create_mailbox",
              "move_to_folder", "apply_label", "mark", "save_attachment",
-             "bulk_mark", "bulk_apply_label", "bulk_move", "reply", "reply_all"}
+             "bulk_mark", "bulk_apply_label", "bulk_move", "reply", "reply_all",
+             "update_draft", "delete_draft", "send_draft", "unsubscribe"}
 if READONLY:
     # Absolute guarantee: a tool that isn't registered cannot be invoked,
     # no matter what an injected instruction asks for.

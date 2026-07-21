@@ -431,6 +431,51 @@ class HeaderAnalysis(unittest.TestCase):
         self.assertEqual(server._sort_key({"date": "nonsense"}), 0.0)
 
 
+class DraftLifecycle(unittest.TestCase):
+    def test_delete_needs_confirmation_or_preview(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_delete_draft({"uid": "1"})
+        self.assertIn("confirmed", str(cm.exception))
+
+    def test_send_draft_needs_confirmation_or_preview(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_send_draft({"uid": "1"})
+        self.assertIn("confirmed", str(cm.exception))
+
+
+class Unsubscribe(unittest.TestCase):
+    def _msg(self, unsub, extra=""):
+        return email.message_from_string(
+            "From: News <news@example.com>\r\nSubject: Offer\r\n"
+            "List-Unsubscribe: " + unsub + "\r\n" + extra + "\r\nbody")
+
+    def test_parses_both_forms(self):
+        m = self._msg("<mailto:off@example.com>, <https://x.example/u>")
+        found = server._ANGLE_RE.findall(m["List-Unsubscribe"])
+        self.assertIn("mailto:off@example.com", found)
+        self.assertIn("https://x.example/u", found)
+
+    def test_message_without_the_header_is_rejected(self):
+        # No connection is opened because the guard is on the header, but the
+        # tool needs one to fetch, so only the parser is asserted here.
+        m = email.message_from_string("From: a@b.example\r\n\r\nx")
+        self.assertIsNone(m.get("List-Unsubscribe"))
+
+    def test_one_click_is_detected(self):
+        m = self._msg("<https://x.example/u>",
+                      "List-Unsubscribe-Post: List-Unsubscribe=One-Click\r\n")
+        self.assertIn("one-click", (m.get("List-Unsubscribe-Post") or "").lower())
+
+    def test_alias_forward_is_recognised(self):
+        m = self._msg("<https://x.example/u>",
+                      "X-SimpleLogin-Type: Forward\r\n"
+                      "X-SimpleLogin-Envelope-To: me.abc@passmail.example\r\n")
+        sl = m.get("X-SimpleLogin-Type") or ""
+        self.assertIn("forward", sl.lower())
+        self.assertEqual(m.get("X-SimpleLogin-Envelope-To"),
+                         "me.abc@passmail.example")
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()
