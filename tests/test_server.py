@@ -935,6 +935,93 @@ class RemoveLabel(unittest.TestCase):
         self.assertIn("Processed", out)
 
 
+class DeleteLabel(unittest.TestCase):
+    """Labels can be deleted, folders cannot, and a server without a Labels/
+    namespace is refused because there a 'label' holds the real messages."""
+
+    class Fake:
+        def __init__(self, boxes):
+            self.boxes = boxes
+            self.deleted = []
+
+        def list(self):
+            return "OK", ['(\\HasNoChildren) "/" "%s"' % b for b in self.boxes]
+
+        def status(self, mailbox, what):
+            return "OK", [b'"x" (MESSAGES 4)']
+
+        def delete(self, mailbox):
+            self.deleted.append(mailbox)
+            return "OK", [b"done"]
+
+    PROTON = ["INBOX", "Archive", "Labels/Invoices", "Labels/Processed",
+              "Folders/Work"]
+    PLAIN = ["INBOX", "Archive", "Receipts"]
+
+    def test_bare_name_resolves_into_the_namespace(self):
+        got = server._resolve_label_for_delete(self.Fake(self.PROTON), "Invoices")
+        self.assertEqual(got, "Labels/Invoices")
+
+    def test_prefixed_name_is_accepted(self):
+        got = server._resolve_label_for_delete(self.Fake(self.PROTON),
+                                               "Labels/Processed")
+        self.assertEqual(got, "Labels/Processed")
+
+    def test_folder_is_refused(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server._resolve_label_for_delete(self.Fake(self.PROTON), "Folders/Work")
+        self.assertIn("not a label", str(cm.exception))
+
+    def test_the_namespace_itself_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._resolve_label_for_delete(self.Fake(self.PROTON), "Labels")
+
+    def test_unknown_label_lists_what_exists(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server._resolve_label_for_delete(self.Fake(self.PROTON), "Nope")
+        self.assertIn("Labels/Invoices", str(cm.exception))
+
+    def test_server_without_the_namespace_is_refused(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server._resolve_label_for_delete(self.Fake(self.PLAIN), "Receipts")
+        self.assertIn("real copies", str(cm.exception))
+
+    def test_empty_name_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._resolve_label_for_delete(self.Fake(self.PROTON), "  ")
+
+    def test_message_count_is_read(self):
+        self.assertEqual(
+            server._label_message_count(self.Fake(self.PROTON), "Labels/Invoices"), 4)
+
+    def test_single_delete_is_gated(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_delete_label({"label": "Invoices"})
+        self.assertIn("confirmed", str(cm.exception))
+
+    def test_bulk_delete_is_gated(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_bulk_delete_labels({"labels": ["Invoices"]})
+        self.assertIn("confirmed", str(cm.exception))
+
+    def test_label_list_parsing(self):
+        self.assertEqual(server._parse_labels({"labels": "a, b\nc"}),
+                         ["a", "b", "c"])
+
+    def test_label_list_deduplicates(self):
+        self.assertEqual(server._parse_labels({"labels": ["a", "a", "b"]}),
+                         ["a", "b"])
+
+    def test_empty_label_list_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._parse_labels({"labels": []})
+
+    def test_label_list_cap(self):
+        with self.assertRaises(server.ToolError):
+            server._parse_labels(
+                {"labels": ["l%d" % i for i in range(server.MAX_BULK + 1)]})
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()

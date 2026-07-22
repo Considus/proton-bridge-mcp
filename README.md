@@ -46,10 +46,12 @@ Files can be attached to anything you send, though only from directories you've 
 | `remove_label` | Takes a label off, leaves the message where it is, gated |
 | `move_to_folder` | Files it somewhere else |
 | `create_folder_or_label` | New folder or label, gated |
+| `delete_label` | Deletes a label, messages keep their place and lose the tag, gated |
+| `bulk_delete_labels` | The same for several labels at once, gated |
 | `send` | Gated, and can carry attachments |
 | `forward` | Gated |
 
-Two things it can't do, and won't pretend otherwise. Bridge has no access to Proton's server-side filters or auto-forwarding rules, so those stay a manual job in the Proton web app. And nothing here hard-deletes, the furthest it goes is Trash.
+Three things it can't do, and won't pretend otherwise. Folders can be created but not deleted, because a folder is where a message actually lives and deleting one would have to decide what happens to the mail inside it, so that stays a job for the Proton app. Bridge has no access to Proton's server-side filters or auto-forwarding rules, so those stay a manual job in the Proton web app. And nothing here hard-deletes, the furthest it goes is Trash.
 
 ### Watching for new mail
 
@@ -85,7 +87,7 @@ Bridge is what this was built for, and it's the case with no alternative, since 
 
 Labels are the one place the two differ. Proton keeps them in their own namespace, so `Marketing` and `Labels/Marketing` both work and mean the same thing. An ordinary IMAP server has no such idea, so a label there is just another folder and tagging copies the message into it. The server works out which kind it's talking to rather than assuming, and if the name matches nothing it tells you what does exist.
 
-Set the hostname and ports to whatever your provider gave you. There's no autodiscovery here — nothing guesses the server name from your email domain, and there's no lookup of the usual `mail.` records, so you enter the exact values from your provider's IMAP/SMTP settings page (for example `mail.lcn.com` with its IMAP and SMTP ports). Once you've typed the name your operating system resolves it to an address the normal way; what isn't automated is working out *which* name to use. Security is worked out from the port, 993 and 465 mean TLS from the first byte, 143 and 587 mean it gets negotiated, and you can say which explicitly if your host is unusual. Plain unencrypted connections aren't offered, since sending your password in clear isn't a trade worth making.
+Set the hostname and ports to whatever your provider gave you. There's no autodiscovery here. Nothing guesses the server name from your email domain, and there's no lookup of the usual `mail.` records, so you enter the exact values from your provider's IMAP/SMTP settings page, for example `mail.lcn.com` with its IMAP and SMTP ports. Once you've typed the name your operating system resolves it to an address the normal way. What isn't automated is working out *which* name to use. Security is worked out from the port, 993 and 465 mean TLS from the first byte, 143 and 587 mean it gets negotiated, and you can say which explicitly if your host is unusual. Plain unencrypted connections aren't offered, since sending your password in clear isn't a trade worth making.
 
 Go in with your eyes open on one thing. Every guarantee below still holds except the first one, because your mail now lives on a server you don't control and travels over the internet to get here. That's a fair trade if the alternative is no assistant access at all, it just isn't the same promise.
 
@@ -117,7 +119,7 @@ uv pip install --python .venv\Scripts\python.exe pypdf keyring
 python setup.py
 ```
 
-No `uv`? Grab it from [astral.sh/uv](https://astral.sh/uv), or use plain Python: on macOS and Linux, `python3 -m venv .venv` then `.venv/bin/python -m pip install pypdf keyring`; on Windows, `python -m venv .venv` then `.venv\Scripts\python -m pip install pypdf keyring`. Drop `pypdf` and you lose PDF text extraction; drop `keyring` and you lose saved-password storage on Linux and Windows.
+No `uv`? Grab it from [astral.sh/uv](https://astral.sh/uv), or use plain Python. On macOS and Linux that's `python3 -m venv .venv` then `.venv/bin/python -m pip install pypdf keyring`. On Windows it's `python -m venv .venv` then `.venv\Scripts\python -m pip install pypdf keyring`. Drop `pypdf` and you lose PDF text extraction. Drop `keyring` and you lose saved-password storage on Linux and Windows.
 
 `setup.py` opens a small page in your browser. It's served from your own machine on a random port behind a single-use link, it shuts itself down when you're finished, and it never logs anything you type. Copy the values across from Bridge, and it'll test both connections before it saves a thing. Your password goes into your computer's secure credential store, never into a file.
 
@@ -160,7 +162,7 @@ Point it at a mailbox in the cloud instead and it works fine, but that sentence 
 
 **Addresses are tracked by where they came from.** Anything in a From, To, Cc or Reply-To header is a real correspondent and you can write to it. An address that only ever appeared in a message body or an attachment is refused as a recipient, and no tool parameter will change that. Convincing the assistant doesn't help, because the refusal isn't the assistant's decision. If you actually want to write to one of those, you add it to `PROTON_ALLOWED_RECIPIENTS` yourself, somewhere no assistant can reach.
 
-Worth being straight about its edges, because it's a strong backstop rather than a force field. An address is only refused if it was seen in content the assistant actually read this session, so a recipient that turned up in no read message isn't being matched against anything. And an address an attacker plants in a header — CCing themselves on a message you open, say — is treated as a correspondent from then on. The two hard limits are the sender allowlist and `PROTON_ALLOWED_RECIPIENTS`; this rule narrows the easy exfiltration route rather than sealing every one.
+Worth being straight about its edges, because it's a strong backstop rather than a force field. An address is only refused if it was seen in content the assistant actually read this session, so a recipient that turned up in no read message isn't being matched against anything. And an address an attacker plants in a header is treated as a correspondent from then on, say by CCing themselves on a message you open. The two hard limits are the sender allowlist and `PROTON_ALLOWED_RECIPIENTS`. This rule narrows the easy exfiltration route rather than sealing every one.
 
 **Unsubscribing is mostly advice.** `unsubscribe` reads the List-Unsubscribe header and tells you what's on offer. It will send the email form if you ask it to, but it never opens the web link, because this server talks to Bridge on your own machine and nothing else, and quietly fetching a URL out of a message would break that and confirm to the sender that you read it. It also checks who was actually subscribed. Mail that came through an alias was sent to the alias, not to you, so unsubscribing from your own address usually matches nothing and disabling the alias is the better answer. It says so rather than sending something that won't work.
 
