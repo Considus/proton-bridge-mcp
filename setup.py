@@ -32,7 +32,9 @@ import webbrowser
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SERVER_PY = os.path.join(HERE, "server.py")
-VENV_PY = os.path.join(HERE, ".venv", "bin", "python")
+VENV_PY = os.path.join(HERE, ".venv",
+                       "Scripts" if os.name == "nt" else "bin",
+                       "python.exe" if os.name == "nt" else "python")
 BRAND_SVG = os.path.join(HERE, "assets", "considus-icon.svg")
 
 TOKEN = secrets.token_urlsafe(32)
