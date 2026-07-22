@@ -817,6 +817,124 @@ class ImapInjection(unittest.TestCase):
         self.assertEqual(server._uidval(" 42 "), "42")
 
 
+class RemoveLabel(unittest.TestCase):
+    """A label is a separate mailbox holding its own copy of the message, so the
+    copy has to be found by Message-ID before it can be dropped."""
+
+    class Fake:
+        """Enough IMAP to exercise the lookup and the expunge path."""
+
+        def __init__(self, boxes, scan=None, search=None, search_fails=False):
+            self.boxes = boxes
+            self.scan = scan or []          # [(uid, raw_header_bytes)]
+            self.search = search            # uids SEARCH returns, or None
+            self.search_fails = search_fails
+            self.selected = None
+            self.stored = []
+            self.expunged = []
+            self.bare_expunge = 0
+
+        def list(self):
+            return "OK", ['(\\HasNoChildren) "/" "%s"' % b for b in self.boxes]
+
+        def select(self, mailbox, readonly=False):
+            self.selected = mailbox
+            return "OK", [b"1"]
+
+        def response(self, name):
+            return name, [b"42"]
+
+        def uid(self, cmd, *args):
+            cmd = cmd.upper()
+            if cmd == "SEARCH":
+                if self.search_fails:
+                    raise server.imaplib.IMAP4.error("no CHARSET")
+                if self.search:
+                    return "OK", [b" ".join(u.encode() for u in self.search)]
+                return "OK", [b""]
+            if cmd == "FETCH":
+                spec = args[0]
+                out = []
+                for u, raw in self.scan:
+                    if spec == "1:*" or spec == u:
+                        out.append((b"%s (UID %s" % (u.encode(), u.encode()), raw))
+                return ("OK", out) if out else ("NO", None)
+            if cmd == "STORE":
+                self.stored.append(args[0])
+                return "OK", [b"done"]
+            if cmd == "EXPUNGE":
+                self.expunged.append(args[0])
+                return "OK", [b"done"]
+            return "NO", None
+
+        def expunge(self):
+            self.bare_expunge += 1
+            return "OK", [b"done"]
+
+    BOXES = ["INBOX", "Labels/Processed", "Folders/Considus"]
+
+    def _hdr(self, mid):
+        return ("Subject: s\r\nFrom: a@b.example\r\nMessage-ID: %s\r\n\r\n"
+                % mid).encode()
+
+    def test_finds_the_copy_via_search(self):
+        f = self.Fake(self.BOXES, search=["77"])
+        self.assertEqual(
+            server._label_copy_uid(f, "Labels/Processed", "<abc@x>"), "77")
+
+    def test_falls_back_to_a_header_scan_when_search_fails(self):
+        f = self.Fake(self.BOXES, scan=[("88", self._hdr("<abc@x>"))],
+                      search_fails=True)
+        self.assertEqual(
+            server._label_copy_uid(f, "Labels/Processed", "<abc@x>"), "88")
+
+    def test_returns_none_when_the_label_is_not_on_it(self):
+        f = self.Fake(self.BOXES, scan=[("88", self._hdr("<other@x>"))])
+        self.assertIsNone(
+            server._label_copy_uid(f, "Labels/Processed", "<abc@x>"))
+
+    def test_message_without_a_message_id_is_refused(self):
+        f = self.Fake(self.BOXES)
+        with self.assertRaises(server.ToolError):
+            server._label_copy_uid(f, "Labels/Processed", "")
+
+    def test_drop_prefers_uid_expunge_over_a_bare_one(self):
+        f = self.Fake(self.BOXES)
+        server._drop_label_copy(f, "77")
+        self.assertEqual(f.expunged, ["77"])
+        self.assertEqual(f.bare_expunge, 0, "a bare EXPUNGE takes other mail with it")
+
+    def test_drop_falls_back_to_bare_expunge(self):
+        f = self.Fake(self.BOXES)
+        f.uid = lambda cmd, *a: (("OK", [b"ok"]) if cmd.upper() == "STORE"
+                                 else (_ for _ in ()).throw(
+                                     server.imaplib.IMAP4.error("no UIDPLUS")))
+        server._drop_label_copy(f, "77")
+        self.assertEqual(f.bare_expunge, 1)
+
+    def test_index_maps_message_ids_to_uids(self):
+        f = self.Fake(self.BOXES, scan=[("1", self._hdr("<a@x>")),
+                                        ("2", self._hdr("<b@x>"))])
+        self.assertEqual(server._label_index(f, "Labels/Processed"),
+                         {"<a@x>": "1", "<b@x>": "2"})
+
+    def test_single_removal_is_gated(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_remove_label({"uid": "1", "label": "Processed"})
+        self.assertIn("confirmed", str(cm.exception))
+
+    def test_bulk_removal_is_gated(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_bulk_remove_label({"uids": ["1"], "label": "Processed"})
+        self.assertIn("confirmed", str(cm.exception))
+
+    def test_bulk_dry_run_touches_nothing(self):
+        out = server.tool_bulk_remove_label(
+            {"uids": ["1", "2"], "label": "Processed", "dry_run": True})
+        self.assertIn("DRY RUN", out)
+        self.assertIn("Processed", out)
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()
