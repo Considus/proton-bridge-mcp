@@ -411,9 +411,40 @@ def _decode(s):
         return s
 
 
+# IMAP protocol strings — reject anything that could break out of a mailbox
+# name, search term or uid and inject a SECOND command on the session. imaplib
+# does NOT guard its arguments: an embedded CR/LF is appended and sent verbatim,
+# so the validation has to live here. Legitimate mailbox names, search terms and
+# uids never contain control characters.
+def _imap_str(value, what="value"):
+    s = str(value)
+    if re.search(r"[\x00-\x1f\x7f]", s):
+        raise ToolError(
+            "Illegal control character in %s. Refused, because it could inject a "
+            "second IMAP command." % what)
+    return s
+
+
+def _imap_quote(value, what="value"):
+    """Quote a value for an IMAP quoted-string: escape the two special
+    characters and reject the control characters that can't appear in one."""
+    s = _imap_str(value, what)
+    return '"%s"' % s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _uidval(uid):
+    """A single message uid is always a bare number. Anything else — ranges,
+    wildcards, CR/LF — is refused so it can't be smuggled into a FETCH/STORE."""
+    u = str(uid).strip()
+    if not u.isdigit():
+        raise ToolError("uid must be a plain number, got %r." % (u[:80],))
+    return u
+
+
 def _folder_quote(name):
-    # IMAP mailbox names with spaces/slashes must be quoted.
-    return '"%s"' % name.replace('"', '\\"')
+    # IMAP mailbox names with spaces/slashes must be quoted. Control characters
+    # are rejected (see _imap_str); backslash and quote are escaped.
+    return _imap_quote(name, "folder name")
 
 
 def _list_folders(conn):
@@ -571,6 +602,17 @@ def _strip_html(s):
     return s.strip()
 
 
+_IMAP_DATE_RE = re.compile(r"^\d{1,2}-[A-Za-z]{3}-\d{4}$")
+
+
+def _imap_date(value, what):
+    d = _imap_str(value, what).strip()
+    if not _IMAP_DATE_RE.match(d):
+        raise ToolError("%s must look like DD-Mon-YYYY, e.g. 01-Jul-2026 (got %r)."
+                        % (what, d[:40]))
+    return d
+
+
 def _build_search(args):
     crit = []
     if args.get("unread_only"):
@@ -578,15 +620,15 @@ def _build_search(args):
     if args.get("flagged_only"):
         crit += ["FLAGGED"]
     if args.get("from"):
-        crit += ["FROM", '"%s"' % args["from"]]
+        crit += ["FROM", _imap_quote(args["from"], "from")]
     if args.get("subject"):
-        crit += ["SUBJECT", '"%s"' % args["subject"]]
+        crit += ["SUBJECT", _imap_quote(args["subject"], "subject")]
     if args.get("since"):  # DD-Mon-YYYY, e.g. 01-Jul-2026
-        crit += ["SINCE", args["since"]]
+        crit += ["SINCE", _imap_date(args["since"], "since")]
     if args.get("before"):
-        crit += ["BEFORE", args["before"]]
+        crit += ["BEFORE", _imap_date(args["before"], "before")]
     if args.get("text"):
-        crit += ["TEXT", '"%s"' % args["text"]]
+        crit += ["TEXT", _imap_quote(args["text"], "text")]
     if not crit:
         crit = ["ALL"]
     return crit
@@ -776,7 +818,7 @@ def tool_get_headers(args):
     message is what it claims to be. Reports what the receiving server decided;
     it is not a verdict of its own."""
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     conn = imap_connect()
     try:
         _select_checked(conn, folder, args.get("uidvalidity"))
@@ -819,7 +861,7 @@ def tool_get_headers(args):
 
 def tool_read_message(args):
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     conn = imap_connect()
     try:
         _select_checked(conn, folder, args.get("uidvalidity"))
@@ -1021,7 +1063,7 @@ def _do_reply(args, reply_all):
     if not body:
         raise ToolError("'body' is required.")
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
 
     conn = imap_connect()
     try:
@@ -1130,7 +1172,7 @@ def _drafts_folder_of(args, conn):
 def tool_update_draft(args):
     """IMAP has no edit. A draft is replaced by appending the new version and
     binning the old one, so threading headers are carried across by hand."""
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     conn = imap_connect()
     try:
         folder = _drafts_folder_of(args, conn)
@@ -1191,7 +1233,7 @@ def tool_delete_draft(args):
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to delete a draft without confirmed=true. "
                         "Preview it with dry_run=true first if you are unsure.")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     conn = imap_connect()
     try:
         folder = _drafts_folder_of(args, conn)
@@ -1225,7 +1267,7 @@ def tool_send_draft(args):
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to send a draft without confirmed=true. Use "
                         "dry_run=true to see exactly what would go out.")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     conn = imap_connect()
     try:
         folder = _drafts_folder_of(args, conn)
@@ -1278,7 +1320,7 @@ def tool_unsubscribe(args):
     And when mail arrived through an alias, the subscribed address is the alias,
     not you, so an unsubscribe sent from your own address usually matches
     nothing. Disabling the alias is the better answer and is said so."""
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     folder = args.get("folder", "INBOX")
     conn = imap_connect()
     try:
@@ -1368,7 +1410,7 @@ def tool_unsubscribe(args):
 
 def tool_mark(args):
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     action = args["action"]  # read | unread | star | unstar
     mapping = {
         "read": ("+FLAGS", r"(\Seen)"),
@@ -1431,7 +1473,7 @@ def _resolve_label(conn, label):
 def tool_apply_label(args):
     """Tag a message. The message stays where it is."""
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     conn = imap_connect()
     try:
         dry = bool(args.get("dry_run"))
@@ -1455,7 +1497,7 @@ def tool_apply_label(args):
 def tool_move_to_folder(args):
     """Filing = MOVE into Folders/<name> (or Archive/Trash)."""
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     dest = args["to_folder"]
     conn = imap_connect()
     try:
@@ -1543,7 +1585,7 @@ def tool_forward(args):
         raise ToolError("Refusing to forward without confirmed=true. Show the "
                         "user who it goes to and call again with confirmed=true.")
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     to = args.get("to", "")
     if not to:
         raise ToolError("'to' is required.")
@@ -1813,7 +1855,7 @@ def _pdf_text(data, limit=20000):
 
 def tool_list_attachments(args):
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     include_noise = bool(args.get("include_inline"))
     conn = imap_connect()
     try:
@@ -1847,7 +1889,7 @@ def tool_list_attachments(args):
 
 def tool_read_attachment(args):
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     want = args.get("filename")
     conn = imap_connect()
     try:
@@ -1918,7 +1960,7 @@ def tool_view_attachment(args):
     model cannot interpret, at a third more bytes than the file itself, so
     those are pushed back to read_attachment or save_attachment instead."""
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     conn = imap_connect()
     try:
         raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
@@ -1953,7 +1995,7 @@ def tool_view_attachment(args):
 
 def tool_save_attachment(args):
     folder = args.get("folder", "INBOX")
-    uid = str(args["uid"])
+    uid = _uidval(args["uid"])
     want = args.get("filename")
     persist = bool(args.get("persist"))
     dest = _persist_dir() if persist else _resolve_dest(args.get("dest_dir"))
@@ -2059,7 +2101,7 @@ def tool_find_thread(args):
     try:
         target_ids = set()
         if not subject:
-            uid = str(args["uid"])
+            uid = _uidval(args["uid"])
             typ, _ = conn.select(_folder_quote(folder), readonly=True)
             typ, md = conn.uid("FETCH", uid, _THREAD_HDRS)
             if typ != "OK" or not md or md[0] is None:

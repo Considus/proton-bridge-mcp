@@ -773,6 +773,50 @@ class LabelResolution(unittest.TestCase):
             server._resolve_label(self.Fake(self.PLAIN), "  ")
 
 
+class ImapInjection(unittest.TestCase):
+    """Folder names, search terms and uids reach the IMAP protocol stream, and
+    imaplib does not guard its arguments. A CR/LF must never survive into one."""
+
+    def test_folder_name_with_crlf_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._folder_quote("INBOX\r\nA1 LOGOUT")
+
+    def test_folder_name_with_control_char_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._folder_quote("Fold\x00er")
+
+    def test_ordinary_folder_name_still_quotes(self):
+        self.assertEqual(server._folder_quote("Folders/Work"), '"Folders/Work"')
+
+    def test_quote_in_folder_name_is_escaped_not_broken_out_of(self):
+        self.assertEqual(server._folder_quote('a"b'), '"a\\"b"')
+
+    def test_search_value_with_crlf_is_refused(self):
+        with self.assertRaises(server.ToolError):
+            server._build_search({"from": 'x\r\nA1 DELETE'})
+
+    def test_search_quote_is_escaped(self):
+        crit = server._build_search({"text": 'he"llo'})
+        self.assertIn('"he\\"llo"', crit)
+
+    def test_search_date_must_be_well_formed(self):
+        with self.assertRaises(server.ToolError):
+            server._build_search({"since": "2026-07-01\r\nEVIL"})
+
+    def test_valid_search_date_passes(self):
+        self.assertIn("01-Jul-2026",
+                      server._build_search({"since": "01-Jul-2026"}))
+
+    def test_uid_must_be_numeric(self):
+        with self.assertRaises(server.ToolError):
+            server._uidval("1\r\nA1 LOGOUT")
+        with self.assertRaises(server.ToolError):
+            server._uidval("1:*")
+
+    def test_numeric_uid_passes(self):
+        self.assertEqual(server._uidval(" 42 "), "42")
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()
