@@ -91,18 +91,31 @@ Go in with your eyes open on one thing. Every guarantee below still holds except
 
 You need Proton Mail Bridge installed, signed in, and running. Bridge is a paid feature, so a free Proton account can't use this. Open Bridge and find Mailbox details, that's where the hostname, ports, username and password come from. Bridge picks its own port numbers, they aren't always 1143 and 1025, so read them rather than assuming.
 
-You'll also need Python 3.9 or newer. PDF text extraction wants `pypdf`, and the setup below installs it into a local virtual environment so it doesn't touch anything else on your system.
+You'll also need Python 3.9 or newer. Two small packages go into a local virtual environment, so they don't touch anything else on your system: `pypdf` reads the text out of PDFs, and `keyring` stores your password in the credential store on Linux and Windows. macOS has its own Keychain command built in, so `keyring` is optional there, but installing it does no harm.
 
 ## Install
+
+**macOS and Linux**
 
 ```bash
 git clone https://github.com/Considus/proton-bridge-mcp.git
 cd proton-bridge-mcp
-uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python pypdf
+uv venv .venv --python 3.12
+uv pip install --python .venv/bin/python pypdf keyring
 python3 setup.py
 ```
 
-No `uv`? Either grab it from [astral.sh/uv](https://astral.sh/uv), or use plain Python and skip PDF text extraction for now.
+**Windows** (PowerShell)
+
+```powershell
+git clone https://github.com/Considus/proton-bridge-mcp.git
+cd proton-bridge-mcp
+uv venv .venv --python 3.12
+uv pip install --python .venv\Scripts\python.exe pypdf keyring
+python setup.py
+```
+
+No `uv`? Grab it from [astral.sh/uv](https://astral.sh/uv), or use plain Python: on macOS and Linux, `python3 -m venv .venv` then `.venv/bin/python -m pip install pypdf keyring`; on Windows, `python -m venv .venv` then `.venv\Scripts\python -m pip install pypdf keyring`. Drop `pypdf` and you lose PDF text extraction; drop `keyring` and you lose saved-password storage on Linux and Windows.
 
 `setup.py` opens a small page in your browser. It's served from your own machine on a random port behind a single-use link, it shuts itself down when you're finished, and it never logs anything you type. Copy the values across from Bridge, and it'll test both connections before it saves a thing. Your password goes into your computer's secure credential store, never into a file.
 
@@ -115,7 +128,7 @@ If the commands above aren't your thing, paste this into any AI assistant that c
 ```
 Please install the Proton Bridge MCP server from https://github.com/Considus/proton-bridge-mcp
 on this computer. Clone it somewhere sensible, create a virtual environment with pypdf
-installed, then run setup.py and tell me the local link it prints so I can finish setup
+and keyring installed, then run setup.py and tell me the local link it prints so I can finish setup
 in my browser. Show me each command before you run it.
 ```
 
