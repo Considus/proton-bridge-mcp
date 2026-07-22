@@ -32,6 +32,7 @@ Files can be attached to anything you send, though only from directories you've 
 | `find_thread` | The whole conversation, and which messages carry documents |
 | `bulk_mark` | Read, unread, star or unstar many messages in one pass |
 | `bulk_apply_label` | One label onto many messages |
+| `bulk_remove_label` | Takes one label off many messages, gated |
 | `bulk_move` | File or Trash many at once, gated |
 | `reply` | Replies with correct threading, gated |
 | `reply_all` | Same, with your own addresses stripped from Cc, gated |
@@ -42,6 +43,7 @@ Files can be attached to anything you send, though only from directories you've 
 | `unsubscribe` | Reports how to unsubscribe, and can send the email form |
 | `mark` | Read, unread, star, unstar |
 | `apply_label` | Tags a message, leaves it where it is |
+| `remove_label` | Takes a label off, leaves the message where it is, gated |
 | `move_to_folder` | Files it somewhere else |
 | `create_mailbox` | New folder or label, gated |
 | `send` | Gated, and can carry attachments |
