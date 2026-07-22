@@ -2599,6 +2599,153 @@ def tool_create_mailbox(args):
 
 
 # ----------------------------------------------------------------------------
+# Deleting a label
+#
+# Labels only, never folders. On Proton a label is a tag: deleting Labels/X
+# unhooks it from every message and the mail itself is untouched. A folder is
+# where a message actually lives, so deleting one has to decide what happens to
+# its contents, and this server's standing rule is that nothing here destroys
+# mail. Folders stay a job for the Proton app.
+# ----------------------------------------------------------------------------
+def _resolve_label_for_delete(conn, label):
+    name = (label or "").strip()
+    if not name:
+        raise ToolError("'label' is required.")
+    existing = _list_folders(conn)
+    namespaced = [f for f in existing if f.startswith("Labels/")]
+    if not namespaced:
+        raise ToolError(
+            "This server has no Labels/ namespace, so a label here is an "
+            "ordinary mailbox holding real copies of the messages, and deleting "
+            "it would take those copies with it. That is not what removing a tag "
+            "should mean, so it is refused. Delete it in your mail client if you "
+            "really do want it gone.")
+    if name.startswith("Folders/"):
+        raise ToolError(
+            "'%s' is a folder, not a label. Folders are where messages actually "
+            "live, so deleting one would have to decide what happens to the mail "
+            "inside it. Nothing here destroys mail — delete folders in the Proton "
+            "app." % name)
+    target = name if name.startswith("Labels/") else "Labels/" + name
+    if target.rstrip("/") == "Labels":
+        raise ToolError("'Labels' is the namespace itself, not a label.")
+    if target not in existing:
+        raise ToolError("No label called '%s'. Existing labels: %s"
+                        % (label, ", ".join(sorted(namespaced))))
+    return target
+
+
+def _label_message_count(conn, target):
+    """How many messages carry this label, so the blast radius is stated before
+    anything happens rather than discovered afterwards."""
+    try:
+        typ, data = conn.status(_folder_quote(target), "(MESSAGES)")
+        if typ == "OK" and data and data[0]:
+            m = re.search(r"MESSAGES\s+(\d+)",
+                          data[0].decode("utf-8", "replace"))
+            if m:
+                return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+def _count_phrase(n):
+    return "an unknown number of" if n is None else str(n)
+
+
+def _parse_labels(args):
+    labels = args.get("labels")
+    if isinstance(labels, str):
+        labels = [l for l in re.split(r"[,\n]+", labels) if l.strip()]
+    if not isinstance(labels, list) or not labels:
+        raise ToolError("'labels' must be a non-empty list of label names.")
+    out, seen = [], []
+    for l in labels:
+        l = str(l).strip()
+        if l and l not in seen:
+            seen.append(l)
+            out.append(l)
+    if not out:
+        raise ToolError("'labels' must be a non-empty list of label names.")
+    if len(out) > MAX_BULK:
+        raise ToolError("%d labels exceeds the %d-per-call limit."
+                        % (len(out), MAX_BULK))
+    return out
+
+
+def tool_delete_label(args):
+    """Delete a label outright. Every message keeps its place and loses the tag."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to delete a label without confirmed=true. "
+                        "Preview it with dry_run=true first to see how many "
+                        "messages carry it.")
+    conn = imap_connect()
+    try:
+        target = _resolve_label_for_delete(conn, args.get("label"))
+        n = _label_message_count(conn, target)
+        if args.get("dry_run"):
+            return _dry("delete the label '%s'" % target,
+                        ["%s message(s) currently carry it" % _count_phrase(n),
+                         "they stay where they are and simply lose the tag"])
+        typ, resp = conn.delete(_folder_quote(target))
+        if typ != "OK":
+            raise ToolError("Could not delete '%s': %s" % (target, resp))
+        return ("Deleted the label '%s'. %s message(s) lost the tag; none were "
+                "deleted." % (target, _count_phrase(n)))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def tool_bulk_delete_labels(args):
+    """Delete several labels in one pass. Same rules as delete_label."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to delete labels without confirmed=true. "
+                        "Preview with dry_run=true first.")
+    labels = _parse_labels(args)
+    conn = imap_connect()
+    done, failed = [], []
+    try:
+        if args.get("dry_run"):
+            lines = []
+            for label in labels:
+                try:
+                    target = _resolve_label_for_delete(conn, label)
+                    n = _label_message_count(conn, target)
+                    lines.append("%s  (%s message(s) carry it)"
+                                 % (target, _count_phrase(n)))
+                except ToolError as e:
+                    lines.append("%s  REFUSED: %s" % (label, e))
+            return _dry("delete %d label(s)" % len(labels), lines)
+        for label in labels:
+            try:
+                target = _resolve_label_for_delete(conn, label)
+                n = _label_message_count(conn, target)
+                typ, resp = conn.delete(_folder_quote(target))
+                if typ != "OK":
+                    raise ToolError(str(resp))
+                done.append("%s (%s message(s) untagged)"
+                            % (target, _count_phrase(n)))
+            except Exception as e:
+                failed.append("%s (%s)" % (label, str(e).splitlines()[0]))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    out = "Deleted %d of %d label(s). No mail was deleted." % (len(done),
+                                                              len(labels))
+    if done:
+        out += "\n  done: %s" % "; ".join(done)
+    if failed:
+        out += "\n  failed: %s" % "; ".join(failed)
+    return out
+
+
+# ----------------------------------------------------------------------------
 # Tool registry (name -> (handler, schema))
 # ----------------------------------------------------------------------------
 TOOLS = [
@@ -3133,6 +3280,38 @@ TOOLS = [
         "handler": tool_create_mailbox,
     },
     {
+        "name": "delete_label",
+        "description": "Delete a label outright. Every message that carried it "
+                       "stays exactly where it is and simply loses the tag — no "
+                       "mail is deleted. Labels only; folders are where messages "
+                       "live and are not deletable here. GATED.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview it, including how many messages carry the label. Changes nothing, needs no confirmation."},
+                "label": {"type": "string", "description": "The label to delete. On Proton the Labels/ prefix is optional."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["label"],
+        },
+        "handler": tool_delete_label,
+    },
+    {
+        "name": "bulk_delete_labels",
+        "description": "Delete several labels in one pass. Messages keep their "
+                       "place and lose the tags. Labels only, GATED.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview each one, including how many messages carry it. Changes nothing."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Label names. On Proton the Labels/ prefix is optional."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["labels"],
+        },
+        "handler": tool_bulk_delete_labels,
+    },
+    {
         "name": "send",
         "description": "Send a new email. GATED: the agent must show the user "
                        "the exact To/Subject/Body, get an explicit yes, then "
@@ -3183,7 +3362,8 @@ _MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
              "move_to_folder", "apply_label", "remove_label", "mark",
              "save_attachment", "bulk_mark", "bulk_apply_label",
              "bulk_remove_label", "bulk_move", "reply", "reply_all",
-             "update_draft", "delete_draft", "send_draft", "unsubscribe"}
+             "update_draft", "delete_draft", "send_draft", "unsubscribe",
+             "delete_label", "bulk_delete_labels"}
 if MODE == "readonly":
     TOOLS = [t for t in TOOLS if t["name"] not in _MUTATING]
 elif MODE == "organise":
