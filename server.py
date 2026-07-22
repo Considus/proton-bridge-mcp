@@ -3117,9 +3117,9 @@ TOOLS = [
     },
     {
         "name": "create_folder_or_label",
-        "description": "Create a new label or folder. GATED: changes mailbox "
-                       "structure, so confirm the exact name and type with the "
-                       "user, then call with confirmed=true.",
+        "description": "Create a new label or folder. GATED: it changes your "
+                       "folder and label structure, so confirm the exact name "
+                       "and type with the user, then call with confirmed=true.",
         "inputSchema": {
             "type": "object",
             "properties": {

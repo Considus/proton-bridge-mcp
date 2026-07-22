@@ -21,7 +21,7 @@ Files can be attached to anything you send, though only from directories you've 
 | `poll_folder` | What has arrived since you last looked |
 | `ack_folder` | Confirms a batch was handled |
 | `search_mail` | Search by text, sender, subject, date range, unread, starred |
-| `search_all_mail` | The same search across every mailbox, duplicates collapsed |
+| `search_all_mail` | The same search across every folder and label, duplicates collapsed |
 | `get_headers` | Headers with SPF, DKIM and DMARC verdicts, and Proton metadata |
 | `read_message` | Full headers and body |
 | `list_attachments` | Real documents, kept apart from inline images and PGP keys |
@@ -55,11 +55,11 @@ Two things it can't do, and won't pretend otherwise. Bridge has no access to Pro
 
 `poll_folder` hands back whatever has turned up since you last looked, which is what turns this from something that reads your mail when asked into something that can react to mail arriving.
 
-The first poll on a mailbox returns nothing on purpose. It notes where the mailbox currently ends, so switching it on doesn't dump years of backlog into a conversation. It reads nothing as read either.
+The first poll on a folder returns nothing on purpose. It notes where the folder currently ends, so switching it on doesn't dump years of backlog into a conversation. It reads nothing as read either.
 
 If you're doing something with each message that you'd rather not do twice, poll with `advance=false`. You get the batch and a checkpoint, the cursor stays where it was, and polling again hands you the same batch until you confirm with `ack_folder`. Crash halfway and you pick up where you left off instead of losing the lot. Confirming twice is harmless.
 
-The cursor records the UIDVALIDITY next to the message number, so a mailbox that resyncs underneath you is spotted rather than acted on. When that happens it re-anchors to the current end and says so, because the alternative is replaying whatever those old numbers now point at.
+The cursor records the UIDVALIDITY next to the message number, so a folder that resyncs underneath you is spotted rather than acted on. When that happens it re-anchors to the current end and says so, because the alternative is replaying whatever those old numbers now point at.
 
 ### Getting at attachments
 
@@ -73,7 +73,7 @@ A message in Proton lives in one folder but also turns up under every label you'
 
 ### UIDs go stale
 
-IMAP identifies a message by a number that's only meaningful until the mailbox resyncs. When that happens the number quietly starts pointing at something else, which is how the wrong message gets filed or trashed. Every folder reports a UIDVALIDITY alongside its uids, and if you hand one back with a uid that no longer matches, the tool refuses and asks you to search again rather than acting on the wrong mail.
+IMAP identifies a message by a number that's only meaningful until the folder resyncs. When that happens the number quietly starts pointing at something else, which is how the wrong message gets filed or trashed. Every folder reports a UIDVALIDITY alongside its uids, and if you hand one back with a uid that no longer matches, the tool refuses and asks you to search again rather than acting on the wrong mail.
 
 ### Conversations aren't messages
 
@@ -83,7 +83,7 @@ Worth knowing before you trust an answer about attachments. Proton's app groups 
 
 Bridge is what this was built for, and it's the case with no alternative, since Proton has no API to point anything else at. The rest of it is ordinary IMAP and SMTP though, so it works against a normal mailbox too, which is useful if your business mail comes from a smaller host rather than Google or Microsoft.
 
-Labels are the one place the two differ. Proton keeps them in their own namespace, so `Marketing` and `Labels/Marketing` both work and mean the same thing. An ordinary IMAP server has no such idea, so a label there is just another mailbox and tagging copies the message into it. The server works out which kind it's talking to rather than assuming, and if the name matches nothing it tells you what does exist.
+Labels are the one place the two differ. Proton keeps them in their own namespace, so `Marketing` and `Labels/Marketing` both work and mean the same thing. An ordinary IMAP server has no such idea, so a label there is just another folder and tagging copies the message into it. The server works out which kind it's talking to rather than assuming, and if the name matches nothing it tells you what does exist.
 
 Set the hostname and ports to whatever your provider gave you. There's no autodiscovery here — nothing guesses the server name from your email domain, and there's no lookup of the usual `mail.` records, so you enter the exact values from your provider's IMAP/SMTP settings page (for example `mail.lcn.com` with its IMAP and SMTP ports). Once you've typed the name your operating system resolves it to an address the normal way; what isn't automated is working out *which* name to use. Security is worked out from the port, 993 and 465 mean TLS from the first byte, 143 and 587 mean it gets negotiated, and you can say which explicitly if your host is unusual. Plain unencrypted connections aren't offered, since sending your password in clear isn't a trade worth making.
 
