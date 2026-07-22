@@ -1458,7 +1458,7 @@ def _resolve_label(conn, label):
         if target in existing:
             return target
         raise ToolError("No label called '%s'. Existing labels: %s. Create it "
-                        "with create_mailbox if it should exist."
+                        "with create_folder_or_label if it should exist."
                         % (label, ", ".join(sorted(namespaced))))
     by_lower = {f.lower(): f for f in existing}
     if label.lower() in by_lower:
@@ -1466,7 +1466,7 @@ def _resolve_label(conn, label):
     raise ToolError(
         "No mailbox called '%s'. This server has no Labels/ namespace, so a "
         "label is an ordinary mailbox and the message gets copied into it. "
-        "Existing mailboxes: %s. Create one with create_mailbox first."
+        "Existing mailboxes: %s. Create one with create_folder_or_label first."
         % (label, ", ".join(sorted(existing)[:25])))
 
 
@@ -2453,7 +2453,7 @@ def tool_poll_mailbox(args):
     only safe move is to start again from the new head rather than guess.
 
     Nothing is marked read. Pass advance=false to look without committing, then
-    confirm with ack_mailbox once the batch is genuinely handled."""
+    confirm with ack_folder once the batch is genuinely handled."""
     folder = args.get("folder", "INBOX")
     limit = max(1, min(int(args.get("limit", 20)), 100))
     advance = args.get("advance", True)
@@ -2502,7 +2502,7 @@ def tool_poll_mailbox(args):
             _write_state(state)
             tail = "Cursor advanced to uid %d." % batch[-1]
         else:
-            tail = ("Cursor NOT moved. Call ack_mailbox with checkpoint '%s' "
+            tail = ("Cursor NOT moved. Call ack_folder with checkpoint '%s' "
                     "once these are handled; until then another poll returns "
                     "the same batch." % checkpoint)
         return ("%d new message(s) in '%s'%s:\n\n%s\n\n%s"
@@ -2517,13 +2517,13 @@ def tool_poll_mailbox(args):
 
 
 def tool_ack_mailbox(args):
-    """Commit a checkpoint from poll_mailbox. Safe to repeat."""
+    """Commit a checkpoint from poll_folder. Safe to repeat."""
     folder = args.get("folder", "INBOX")
     checkpoint = str(args.get("checkpoint", "")).strip()
     validity, _, uid = checkpoint.partition(":")
     if not validity or not uid.isdigit():
         raise ToolError("checkpoint should look like '<uidvalidity>:<uid>', "
-                        "exactly as poll_mailbox reported it.")
+                        "exactly as poll_folder reported it.")
     state = _read_state()
     cursor = (state.get("cursors") or {}).get(folder) or {}
     if cursor and str(cursor.get("uidvalidity")) != validity:
@@ -2622,7 +2622,7 @@ TOOLS = [
         "handler": tool_folder_status,
     },
     {
-        "name": "poll_mailbox",
+        "name": "poll_folder",
         "description": "Messages that have arrived since the last poll. The very "
                        "first poll emits nothing and just records where the "
                        "mailbox ends, so turning this on does not replay the "
@@ -2632,20 +2632,20 @@ TOOLS = [
             "properties": {
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "limit": {"type": "integer", "description": "Most per call, 1 to 100 (default 20)."},
-                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with ack_mailbox."},
+                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with ack_folder."},
             },
         },
         "handler": tool_poll_mailbox,
     },
     {
-        "name": "ack_mailbox",
-        "description": "Commit a checkpoint returned by poll_mailbox with "
+        "name": "ack_folder",
+        "description": "Commit a checkpoint returned by poll_folder with "
                        "advance=false. Repeating it is harmless.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "folder": {"type": "string", "description": "Default INBOX."},
-                "checkpoint": {"type": "string", "description": "Exactly as poll_mailbox reported it."},
+                "checkpoint": {"type": "string", "description": "Exactly as poll_folder reported it."},
             },
             "required": ["checkpoint"],
         },
@@ -3116,10 +3116,10 @@ TOOLS = [
         "handler": tool_move_to_folder,
     },
     {
-        "name": "create_mailbox",
-        "description": "Create a new label or folder. GATED: changes mailbox "
-                       "structure, so confirm the exact name and type with the "
-                       "user, then call with confirmed=true.",
+        "name": "create_folder_or_label",
+        "description": "Create a new label or folder. GATED: it changes your "
+                       "folder and label structure, so confirm the exact name "
+                       "and type with the user, then call with confirmed=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3179,7 +3179,7 @@ TOOLS = [
 ]
 
 MODE = _mode()
-_MUTATING = {"send", "forward", "create_draft", "create_mailbox",
+_MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
              "move_to_folder", "apply_label", "remove_label", "mark",
              "save_attachment", "bulk_mark", "bulk_apply_label",
              "bulk_remove_label", "bulk_move", "reply", "reply_all",

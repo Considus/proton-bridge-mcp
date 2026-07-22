@@ -18,10 +18,10 @@ Files can be attached to anything you send, though only from directories you've 
 |---|---|
 | `list_folders` | Every folder and label, read live each time |
 | `folder_status` | Counts, plus the UIDVALIDITY every uid in that folder depends on |
-| `poll_mailbox` | What has arrived since you last looked |
-| `ack_mailbox` | Confirms a batch was handled |
+| `poll_folder` | What has arrived since you last looked |
+| `ack_folder` | Confirms a batch was handled |
 | `search_mail` | Search by text, sender, subject, date range, unread, starred |
-| `search_all_mail` | The same search across every mailbox, duplicates collapsed |
+| `search_all_mail` | The same search across every folder and label, duplicates collapsed |
 | `get_headers` | Headers with SPF, DKIM and DMARC verdicts, and Proton metadata |
 | `read_message` | Full headers and body |
 | `list_attachments` | Real documents, kept apart from inline images and PGP keys |
@@ -45,7 +45,7 @@ Files can be attached to anything you send, though only from directories you've 
 | `apply_label` | Tags a message, leaves it where it is |
 | `remove_label` | Takes a label off, leaves the message where it is, gated |
 | `move_to_folder` | Files it somewhere else |
-| `create_mailbox` | New folder or label, gated |
+| `create_folder_or_label` | New folder or label, gated |
 | `send` | Gated, and can carry attachments |
 | `forward` | Gated |
 
@@ -53,13 +53,13 @@ Two things it can't do, and won't pretend otherwise. Bridge has no access to Pro
 
 ### Watching for new mail
 
-`poll_mailbox` hands back whatever has turned up since you last looked, which is what turns this from something that reads your mail when asked into something that can react to mail arriving.
+`poll_folder` hands back whatever has turned up since you last looked, which is what turns this from something that reads your mail when asked into something that can react to mail arriving.
 
-The first poll on a mailbox returns nothing on purpose. It notes where the mailbox currently ends, so switching it on doesn't dump years of backlog into a conversation. It reads nothing as read either.
+The first poll on a folder returns nothing on purpose. It notes where the folder currently ends, so switching it on doesn't dump years of backlog into a conversation. It reads nothing as read either.
 
-If you're doing something with each message that you'd rather not do twice, poll with `advance=false`. You get the batch and a checkpoint, the cursor stays where it was, and polling again hands you the same batch until you confirm with `ack_mailbox`. Crash halfway and you pick up where you left off instead of losing the lot. Confirming twice is harmless.
+If you're doing something with each message that you'd rather not do twice, poll with `advance=false`. You get the batch and a checkpoint, the cursor stays where it was, and polling again hands you the same batch until you confirm with `ack_folder`. Crash halfway and you pick up where you left off instead of losing the lot. Confirming twice is harmless.
 
-The cursor records the UIDVALIDITY next to the message number, so a mailbox that resyncs underneath you is spotted rather than acted on. When that happens it re-anchors to the current end and says so, because the alternative is replaying whatever those old numbers now point at.
+The cursor records the UIDVALIDITY next to the message number, so a folder that resyncs underneath you is spotted rather than acted on. When that happens it re-anchors to the current end and says so, because the alternative is replaying whatever those old numbers now point at.
 
 ### Getting at attachments
 
@@ -73,7 +73,7 @@ A message in Proton lives in one folder but also turns up under every label you'
 
 ### UIDs go stale
 
-IMAP identifies a message by a number that's only meaningful until the mailbox resyncs. When that happens the number quietly starts pointing at something else, which is how the wrong message gets filed or trashed. Every folder reports a UIDVALIDITY alongside its uids, and if you hand one back with a uid that no longer matches, the tool refuses and asks you to search again rather than acting on the wrong mail.
+IMAP identifies a message by a number that's only meaningful until the folder resyncs. When that happens the number quietly starts pointing at something else, which is how the wrong message gets filed or trashed. Every folder reports a UIDVALIDITY alongside its uids, and if you hand one back with a uid that no longer matches, the tool refuses and asks you to search again rather than acting on the wrong mail.
 
 ### Conversations aren't messages
 
@@ -83,7 +83,7 @@ Worth knowing before you trust an answer about attachments. Proton's app groups 
 
 Bridge is what this was built for, and it's the case with no alternative, since Proton has no API to point anything else at. The rest of it is ordinary IMAP and SMTP though, so it works against a normal mailbox too, which is useful if your business mail comes from a smaller host rather than Google or Microsoft.
 
-Labels are the one place the two differ. Proton keeps them in their own namespace, so `Marketing` and `Labels/Marketing` both work and mean the same thing. An ordinary IMAP server has no such idea, so a label there is just another mailbox and tagging copies the message into it. The server works out which kind it's talking to rather than assuming, and if the name matches nothing it tells you what does exist.
+Labels are the one place the two differ. Proton keeps them in their own namespace, so `Marketing` and `Labels/Marketing` both work and mean the same thing. An ordinary IMAP server has no such idea, so a label there is just another folder and tagging copies the message into it. The server works out which kind it's talking to rather than assuming, and if the name matches nothing it tells you what does exist.
 
 Set the hostname and ports to whatever your provider gave you. There's no autodiscovery here — nothing guesses the server name from your email domain, and there's no lookup of the usual `mail.` records, so you enter the exact values from your provider's IMAP/SMTP settings page (for example `mail.lcn.com` with its IMAP and SMTP ports). Once you've typed the name your operating system resolves it to an address the normal way; what isn't automated is working out *which* name to use. Security is worked out from the port, 993 and 465 mean TLS from the first byte, 143 and 587 mean it gets negotiated, and you can say which explicitly if your host is unusual. Plain unencrypted connections aren't offered, since sending your password in clear isn't a trade worth making.
 
@@ -170,7 +170,7 @@ Worth being straight about its edges, because it's a strong backstop rather than
 
 **Mail can only go out as you.** `from_address` is checked against an allowlist that starts as your own address and your alias-owner address, nothing else. An injected instruction can't make mail appear to come from someone else, and widening it means editing `PROTON_ALLOWED_SENDERS` yourself.
 
-**Sending always stops.** `send`, `forward` and `create_mailbox` refuse unless the assistant passes `confirmed=true`, which it should only do after showing you the exact recipient, subject and body. That one is a speed bump rather than a wall, an assistant that had been fully talked round could set it, which is exactly why the address rule above exists as well.
+**Sending always stops.** `send`, `forward` and `create_folder_or_label` refuse unless the assistant passes `confirmed=true`, which it should only do after showing you the exact recipient, subject and body. That one is a speed bump rather than a wall, an assistant that had been fully talked round could set it, which is exactly why the address rule above exists as well.
 
 **Everything that changes something is logged.** Sends, moves, labels, drafts, new folders, saved attachments, each one appended to `audit.log` next to the server as a single line of JSON, owner-readable only. Message bodies are never written, only their length, so the log tells you what happened without quietly becoming a second copy of your mailbox. Refusals are recorded too, which is the half you'd actually want after something odd. Turn it off with `PROTON_AUDIT=0` if you'd rather.
 
