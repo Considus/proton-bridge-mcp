@@ -1494,6 +1494,168 @@ def tool_apply_label(args):
             pass
 
 
+# ----------------------------------------------------------------------------
+# Removing a label
+#
+# A label is a separate mailbox holding its OWN copy of the message, with its
+# own uid. The uid you hold for INBOX means nothing inside Labels/X, so the copy
+# has to be matched on Message-ID first. Taking the label off means dropping
+# that copy: on Proton the message itself is untouched and simply loses the tag.
+#
+# These are gated. Applying a label only adds; removing one ends in an EXPUNGE,
+# and an expunge against the wrong mailbox is not something to find out about
+# afterwards.
+# ----------------------------------------------------------------------------
+def _message_id_of(conn, uid, folder):
+    typ, md = conn.uid("FETCH", uid,
+                       "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM)])")
+    if typ != "OK" or not md or md[0] is None:
+        raise ToolError("Message uid %s not found in '%s'." % (uid, folder))
+    return _parse_envelope(md[0][1])
+
+
+def _label_index(conn, label_mailbox):
+    """-> {message_id: uid} for a label mailbox, scanned once. UIDs survive an
+    expunge (only sequence numbers shift), so one pass is safe for a batch."""
+    typ, _ = conn.select(_folder_quote(label_mailbox), readonly=False)
+    if typ != "OK":
+        raise ToolError("Cannot open label mailbox '%s'." % label_mailbox)
+    index = {}
+    for u, m in _scan_headers(conn):
+        mid = (m.get("Message-ID") or "").strip()
+        if mid and mid not in index:
+            index[mid] = u
+    return index
+
+
+def _label_copy_uid(conn, label_mailbox, message_id):
+    """The uid of this message's copy inside a label mailbox, or None if the
+    label isn't on it. SEARCH is tried first, then a local header scan, because
+    Bridge's SEARCH is not something to rely on."""
+    if not message_id:
+        raise ToolError(
+            "That message has no Message-ID, so its copy inside '%s' cannot be "
+            "identified. Nothing was changed." % label_mailbox)
+    typ, _ = conn.select(_folder_quote(label_mailbox), readonly=False)
+    if typ != "OK":
+        raise ToolError("Cannot open label mailbox '%s'." % label_mailbox)
+    try:
+        typ, data = conn.uid("SEARCH", None, "HEADER", "Message-ID",
+                             _imap_quote(message_id, "message-id"))
+        if typ == "OK" and data and data[0]:
+            return data[0].split()[0].decode()
+    except imaplib.IMAP4.error:
+        pass
+    for u, m in _scan_headers(conn):
+        if (m.get("Message-ID") or "").strip() == message_id:
+            return u
+    return None
+
+
+def _drop_label_copy(conn, copy_uid):
+    """Expunge one copy out of the currently-selected label mailbox. UID EXPUNGE
+    (RFC 4315) touches only this uid; a bare EXPUNGE would take anything else in
+    the mailbox already flagged \\Deleted with it, so it's the fallback."""
+    typ, resp = conn.uid("STORE", copy_uid, "+FLAGS", r"(\Deleted)")
+    if typ != "OK":
+        raise ToolError("Could not flag the label copy for removal: %s" % resp)
+    try:
+        typ, _ = conn.uid("EXPUNGE", copy_uid)
+    except imaplib.IMAP4.error:
+        typ = "NO"
+    if typ != "OK":
+        conn.expunge()
+
+
+def tool_remove_label(args):
+    """Take a label off a message. The message stays where it is."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to remove a label without confirmed=true. "
+                        "Preview it with dry_run=true first if you are unsure.")
+    folder = args.get("folder", "INBOX")
+    uid = _uidval(args["uid"])
+    conn = imap_connect()
+    try:
+        target = _resolve_label(conn, args["label"])
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=True)
+        env = _message_id_of(conn, uid, folder)
+        if args.get("dry_run"):
+            return _dry("remove label '%s'" % target,
+                        ['uid %s  "%s"  from %s'
+                         % (uid, env["subject"] or "(no subject)",
+                            env["from"] or "(unknown)"),
+                         "the message itself stays in '%s'" % folder])
+        copy_uid = _label_copy_uid(conn, target, env["message_id"])
+        if copy_uid is None:
+            return ("Label '%s' is not on uid %s, so there was nothing to remove."
+                    % (target, uid))
+        _drop_label_copy(conn, copy_uid)
+        return ("Removed label '%s' from uid %s. The message stays in '%s'."
+                % (target, uid, folder))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+def tool_bulk_remove_label(args):
+    """Take one label off many messages. Gated, like the single version."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing a bulk label removal without confirmed=true. "
+                        "Show the user the uids and the label, or call with "
+                        "dry_run=true first, then confirm.")
+    folder = args.get("folder", "INBOX")
+    uids = _parse_uids(args)
+    if args.get("dry_run"):
+        return ("DRY RUN, nothing changed. Would remove label '%s' from %d "
+                "message(s) in '%s':\n  %s"
+                % (args["label"], len(uids), folder, ", ".join(uids)))
+    conn = imap_connect()
+    done, absent, failed = [], [], []
+    try:
+        target = _resolve_label(conn, args["label"])
+        # Message-IDs come from the source folder, before switching mailbox.
+        _select_checked(conn, folder, args.get("uidvalidity"), readonly=True)
+        mids = {}
+        for uid in uids:
+            try:
+                mids[uid] = _message_id_of(conn, uid, folder)["message_id"]
+            except ToolError as e:
+                failed.append("%s (%s)" % (uid, e))
+        index = _label_index(conn, target)
+        for uid in uids:
+            mid = mids.get(uid)
+            if mid is None:
+                continue  # already recorded in failed
+            if not mid:
+                failed.append("%s (no Message-ID)" % uid)
+                continue
+            copy_uid = index.get(mid)
+            if copy_uid is None:
+                absent.append(uid)
+                continue
+            try:
+                _drop_label_copy(conn, copy_uid)
+                done.append(uid)
+            except Exception as e:
+                failed.append("%s (%s)" % (uid, e))
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    out = ("Removed label '%s' from %d of %d message(s) in '%s'."
+           % (target, len(done), len(uids), folder))
+    if done:
+        out += "\n  done: %s" % ", ".join(done)
+    if absent:
+        out += "\n  didn't have it: %s" % ", ".join(absent)
+    if failed:
+        out += "\n  failed: %s" % "; ".join(failed)
+    return out
+
+
 def tool_move_to_folder(args):
     """Filing = MOVE into Folders/<name> (or Archive/Trash)."""
     folder = args.get("folder", "INBOX")
@@ -2899,6 +3061,44 @@ TOOLS = [
         "handler": tool_apply_label,
     },
     {
+        "name": "remove_label",
+        "description": "Take a label off a message. The message itself stays "
+                       "where it is. GATED: removing a label ends in an expunge "
+                       "against the label mailbox, so confirm it or preview with "
+                       "dry_run=true first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+                "uid": {"type": "string"},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
+                "folder": {"type": "string", "description": "Folder the message lives in, default INBOX."},
+                "label": {"type": "string", "description": "The label to take off. On Proton the Labels/ prefix is optional."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["uid", "label"],
+        },
+        "handler": tool_remove_label,
+    },
+    {
+        "name": "bulk_remove_label",
+        "description": "Take one label off many messages at once. The messages "
+                       "stay where they are. GATED, like remove_label.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
+                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
+                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
+                "label": {"type": "string", "description": "The label to take off. On Proton the Labels/ prefix is optional."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["uids", "label"],
+        },
+        "handler": tool_bulk_remove_label,
+    },
+    {
         "name": "move_to_folder",
         "description": "File a message: move it into another folder (e.g. "
                        "'Folders/<name>', 'Archive', 'Trash').",
@@ -2980,8 +3180,9 @@ TOOLS = [
 
 MODE = _mode()
 _MUTATING = {"send", "forward", "create_draft", "create_mailbox",
-             "move_to_folder", "apply_label", "mark", "save_attachment",
-             "bulk_mark", "bulk_apply_label", "bulk_move", "reply", "reply_all",
+             "move_to_folder", "apply_label", "remove_label", "mark",
+             "save_attachment", "bulk_mark", "bulk_apply_label",
+             "bulk_remove_label", "bulk_move", "reply", "reply_all",
              "update_draft", "delete_draft", "send_draft", "unsubscribe"}
 if MODE == "readonly":
     TOOLS = [t for t in TOOLS if t["name"] not in _MUTATING]
