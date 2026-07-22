@@ -2,7 +2,7 @@
 """
 Proton Bridge MCP — guided local setup.
 
-Starts a ONE-SHOT web UI on 127.0.0.1 (random port, single-use token), collects
+Starts a web UI on 127.0.0.1 (random port, single-session token), collects
 your Bridge mailbox details, verifies them against Bridge, stores the passwords
 in the operating system's secure credential store, writes the MCP client
 config, and shuts itself down.
@@ -86,7 +86,20 @@ def brand_mark():
 # ---------------------------------------------------------------------------
 def store_password(user, password, service=KEYCHAIN_SVC):
     """Store in the OS credential store — Keychain on macOS, Credential Manager
-    on Windows, Secret Service/KWallet on Linux. Never touches disk in plaintext."""
+    on Windows, Secret Service/KWallet on Linux. Never touches disk in plaintext.
+
+    keyring is preferred wherever it's importable because it calls the platform
+    credential API directly, keeping the password out of the process argument
+    list. Stock macOS has no keyring, so we fall back to the `security` tool;
+    its `-w` places the secret in argv for the lifetime of that one short-lived
+    call — a known, accepted trade-off on a single-user machine, and the reason
+    keyring is tried first."""
+    try:
+        import keyring
+        keyring.set_password(service, user, password)
+        return "secure credential store"
+    except Exception:
+        pass
     if sys.platform == "darwin":
         r = subprocess.run(
             ["security", "add-generic-password", "-U", "-a", user,
@@ -94,16 +107,12 @@ def store_password(user, password, service=KEYCHAIN_SVC):
             capture_output=True, text=True)
         if r.returncode == 0:
             return "secure credential store"
-        raise RuntimeError("Could not save to the credential store: %s" % (r.stderr.strip() or r.returncode))
-    try:
-        import keyring
-        keyring.set_password(service, user, password)
-        return "secure credential store"
-    except ImportError:
-        raise RuntimeError(
-            "No secure credential store available on this computer. Install "
-            "support with `pip install keyring`, or set PROTON_BRIDGE_PASSWORD "
-            "in your MCP config instead.")
+        raise RuntimeError("Could not save to the credential store: %s"
+                           % (r.stderr.strip() or r.returncode))
+    raise RuntimeError(
+        "No secure credential store available on this computer. Install "
+        "support with `pip install keyring`, or set PROTON_BRIDGE_PASSWORD "
+        "in your MCP config instead.")
 
 
 def existing_config():
@@ -137,24 +146,57 @@ def lookup_password(account, service):
         return None
 
 
-def verify(iuser, ipass, ihost, iport, suser, spass, shost, sport):
+_LOOPBACK = ("127.0.0.1", "::1", "localhost")
+
+
+def _verify_ctx(host):
+    """Mirror the running server's TLS policy: skip verification only on
+    loopback, where Bridge's self-signed certificate can't be checked against a
+    public CA. A real remote provider is verified properly, so setup can't hand
+    the mailbox password to a man in the middle."""
+    ctx = ssl.create_default_context()
+    if (host or "").strip().lower() in _LOOPBACK:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _sec_mode(mode, port):
+    """auto -> implicit TLS on the secure ports, STARTTLS elsewhere."""
+    mode = (mode or "auto").strip().lower()
+    if mode == "auto":
+        return "ssl" if int(port) in (993, 465) else "starttls"
+    return mode
+
+
+def verify(iuser, ipass, ihost, iport, suser, spass, shost, sport,
+           isec="auto", ssec="auto"):
     """Prove both sets of details work before we store anything. IMAP and SMTP
     are checked independently — Bridge shares credentials today, but nothing
-    here assumes it will forever."""
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
+    here assumes it will forever. TLS is verified for real remote hosts and only
+    skipped on loopback, matching the server; the chosen security mode decides
+    implicit TLS versus STARTTLS."""
+    imode = _sec_mode(isec, iport)
+    ictx = _verify_ctx(ihost)
     try:
-        c = imaplib.IMAP4(ihost, int(iport), timeout=15)
-        c.starttls(ctx)
+        if imode == "ssl":
+            c = imaplib.IMAP4_SSL(ihost, int(iport), ssl_context=ictx, timeout=15)
+        else:
+            c = imaplib.IMAP4(ihost, int(iport), timeout=15)
+            c.starttls(ictx)
         c.login(iuser, ipass)
         n = len(c.list()[1] or [])
         c.logout()
     except Exception as e:
         raise RuntimeError("IMAP check failed on %s:%s — %s" % (ihost, iport, e))
+    smode = _sec_mode(ssec, sport)
+    sctx = _verify_ctx(shost)
     try:
-        s = smtplib.SMTP(shost, int(sport), timeout=15)
-        s.ehlo(); s.starttls(context=ctx); s.ehlo()
+        if smode == "ssl":
+            s = smtplib.SMTP_SSL(shost, int(sport), timeout=15, context=sctx)
+        else:
+            s = smtplib.SMTP(shost, int(sport), timeout=15)
+            s.ehlo(); s.starttls(context=sctx); s.ehlo()
         s.login(suser, spass)
         s.quit()
     except Exception as e:
@@ -432,7 +474,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         got = (q.get("token") or [""])[0]
         return hmac.compare_digest(got, TOKEN)
 
+    def _host_ok(self):
+        """Only answer requests addressed to this machine by name. Closes the
+        DNS-rebinding path where a remote page resolves its own domain to
+        127.0.0.1 to reach this server; the browser still sends the attacker's
+        Host, so it's refused before the token is even considered."""
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip().lower()
+        return host in ("", "127.0.0.1", "localhost", "::1", "[::1]")
+
     def do_GET(self):
+        if not self._host_ok():
+            self._send(page("<h1>Not authorised</h1>"), 403)
+            return
         if not self._authed():
             self._send(page("<h1>Not authorised</h1><p class='lede'>Open the exact link "
                             "printed in your terminal.</p>"), 403)
@@ -440,6 +493,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self._send(form_page(existing=EXISTING))
 
     def do_POST(self):
+        if not self._host_ok():
+            self._send(page("<h1>Not authorised</h1>"), 403)
+            return
         if not self._authed():
             self._send(page("<h1>Not authorised</h1>"), 403)
             return
@@ -510,7 +566,7 @@ def main():
     url = "http://127.0.0.1:%d/?token=%s" % (port, TOKEN)
     print("\n  Considus · Proton Bridge MCP %s" % (
         "settings update" if EXISTING else "setup"))
-    print("  Local only — bound to 127.0.0.1, single-use link, shuts down when done.\n")
+    print("  Local only — bound to 127.0.0.1, single-session link, shuts down when done.\n")
     print("  %s\n" % url)
     threading.Timer(IDLE_TIMEOUT, httpd.shutdown).start()
     try:
