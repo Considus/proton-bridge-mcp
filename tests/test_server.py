@@ -1008,7 +1008,7 @@ class Protocol(unittest.TestCase):
                    env={"PROTON_READONLY": "1"})
         tools = [t["name"] for m in msgs if m.get("id") == 2
                  for t in m["result"]["tools"]]
-        for gone in ("send", "forward", "move_to_folder", "create_mailbox",
+        for gone in ("send", "forward", "move_to_folder", "create_folder_or_label",
                      "apply_label", "mark", "save_attachment", "create_draft"):
             self.assertNotIn(gone, tools)
         self.assertIn("read_message", tools)
