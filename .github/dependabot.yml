@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # The server is standard-library-only, so there's no Python manifest to
+  # track. The one thing with pinned versions is the CI workflow's actions —
+  # keep those current (and their commit-SHA pins refreshed) here.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
