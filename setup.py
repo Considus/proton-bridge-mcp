@@ -10,7 +10,8 @@ config, and shuts itself down.
 Nothing leaves this computer. The password is never written to disk in plaintext,
 never logged, and never echoed back into the page.
 
-    python3 setup.py
+    .venv/bin/python setup.py            (macOS and Linux)
+    .venv\\Scripts\\python.exe setup.py    (Windows)
 """
 
 import hmac
@@ -428,6 +429,16 @@ secure credential store, and this page shuts down the moment setup completes.</p
        "Both connections are tested before anything is saved."))
 
 
+def rerun_command():
+    """How to start setup again, phrased for the OS we're on. The venv's own
+    Python is the right interpreter because keyring lives there, and update
+    mode needs it to re-save passwords on Windows and Linux."""
+    if os.path.exists(VENV_PY):
+        return (".venv\\Scripts\\python.exe setup.py" if os.name == "nt"
+                else ".venv/bin/python setup.py")
+    return "python setup.py" if os.name == "nt" else "python3 setup.py"
+
+
 def done_page(user, store, mailboxes, settings_path):
     prompt = install_prompt()
     return page("""
@@ -446,10 +457,11 @@ It works out where that client keeps its own MCP config, so it stays correct as 
 No settings or passwords are in it.</p>
 <pre id="p">%s</pre>
 <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('p').textContent).then(()=>{this.textContent='Copied';setTimeout(()=>this.textContent='Copy prompt',1600)})">Copy prompt</button>
-<p class="note" style="margin-top:26px">Run <code>python3 setup.py</code> again to change
-anything \u2014 it reopens in update mode. This page has now shut down.</p>
+<p class="note" style="margin-top:26px">Run <code>%s</code> again from the server's folder to
+change anything \u2014 it reopens in update mode. This page has now shut down.</p>
 """ % (html.escape(user), mailboxes, html.escape(store),
-       html.escape(settings_path), html.escape(prompt)))
+       html.escape(settings_path), html.escape(prompt),
+       html.escape(rerun_command())))
 
 
 # ---------------------------------------------------------------------------
