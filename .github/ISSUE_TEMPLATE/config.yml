@@ -1,5 +1,8 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
     url: https://github.com/Considus/proton-bridge-mcp/security/advisories/new
     about: Please report anything exploitable privately, not as a public issue.
+  - name: Question about using it
+    url: https://github.com/Considus/proton-bridge-mcp#readme
+    about: Setup and usage are covered in the README. Open a bug report if something there doesn't work.
