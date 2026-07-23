@@ -247,10 +247,11 @@ def install_prompt(name="proton-mail"):
     return """I have a local MCP server on this computer and I'd like you to register it with \
 the MCP client you are running inside.
 
-Server details:
+Server details (the command and args values are JSON strings, quoted and escaped
+exactly as a JSON config needs them — copy them as they are):
   name    = %s
   command = %s
-  args    = ["%s"]
+  args    = [%s]
 
 Please:
 1. Work out where THIS client stores its MCP server configuration on this machine.
@@ -266,7 +267,8 @@ a password in the config.
 5. Tell me which file you changed and whether I need to restart the app.
 
 If you cannot write files, just tell me the exact file path and the exact snippet to paste, \
-and I will do it myself.""" % (name, server_command(), SERVER_PY, name)
+and I will do it myself.""" % (name, json.dumps(server_command()),
+                               json.dumps(SERVER_PY), name)
 
 
 # ---------------------------------------------------------------------------
