@@ -1,0 +1,36 @@
+name: Feature request
+description: Suggest something the tool could do
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What you're trying to do
+      description: >
+        The task or problem behind the request, not just the feature itself. It's easier to
+        find the right answer from the goal.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you'd like
+      description: The behaviour you have in mind.
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Anything you've considered
+      description: >
+        Other ways round it, or why the current tools don't quite manage it.
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        **Worth keeping in mind.** The server stays standard-library only, and anything that
+        sends stays gated and confirmed. Ideas that fit those hold up best.

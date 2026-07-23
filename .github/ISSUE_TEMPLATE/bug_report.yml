@@ -1,0 +1,96 @@
+name: Bug report
+description: Something doesn't work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If the problem is exploitable, please don't file it here. There's a private path in
+        [SECURITY.md](https://github.com/Considus/proton-bridge-mcp/blob/main/SECURITY.md).
+
+        Everything you paste below is public, so redact addresses and subjects you'd rather
+        not share.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what went wrong.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What you thought would happen instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "macOS 15.2 / Ubuntu 24.04 / Windows 11"
+    validations:
+      required: false
+
+  - type: input
+    id: python
+    attributes:
+      label: Python version
+      description: The output of `python3 --version`.
+      placeholder: "3.12.4"
+    validations:
+      required: false
+
+  - type: input
+    id: client
+    attributes:
+      label: Which client
+      placeholder: "Claude Desktop / Claude Code / Cursor / Zed"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: mail-backend
+    attributes:
+      label: What it's talking to
+      options:
+        - Proton Mail Bridge
+        - Another IMAP/SMTP provider
+        - Not sure
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Anything from the logs
+      description: >
+        Relevant lines from `audit.log` or your client's MCP logs. Redact anything you'd
+        rather not have in public.
+      render: text
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: This isn't a security vulnerability. If it is, I'll use the private path instead.
+          required: true
+        - label: I've redacted addresses, subjects and message contents I don't want public.
+          required: true
