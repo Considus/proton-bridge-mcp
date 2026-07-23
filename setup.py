@@ -14,6 +14,7 @@ never logged, and never echoed back into the page.
     .venv\\Scripts\\python.exe setup.py    (Windows)
 """
 
+import base64
 import hmac
 import html
 import http.server
@@ -61,6 +62,43 @@ def _p(*parts):
 SETTINGS_FILE = os.path.join(HERE, "settings.json")
 
 EXISTING = None  # populated at startup; drives update mode
+
+
+# ---------------------------------------------------------------------------
+# Brand fonts
+# ---------------------------------------------------------------------------
+FONTS_DIR = os.path.join(HERE, "assets", "fonts")
+_FONT_FACES = [
+    # (family, weight, style, filename) — only the faces the page actually uses.
+    ("DM Sans", 400, "normal", "dm-sans-normal-400.woff2"),
+    ("DM Sans", 500, "normal", "dm-sans-normal-500.woff2"),
+    ("Cormorant Garamond", 300, "normal", "cormorant-garamond-normal-300.woff2"),
+    ("Cormorant Garamond", 300, "italic", "cormorant-garamond-italic-300.woff2"),
+]
+_font_css_cache = None
+
+
+def font_css():
+    """Embed the brand faces as data: URIs. The page loads nothing from the
+    network on principle, so inlining is the only way to guarantee the brand
+    fonts on a machine that doesn't have them installed. A missing file just
+    drops that face, and text falls back to the system stack as before."""
+    global _font_css_cache
+    if _font_css_cache is not None:
+        return _font_css_cache
+    rules = []
+    for family, weight, style, fname in _FONT_FACES:
+        try:
+            with open(os.path.join(FONTS_DIR, fname), "rb") as f:
+                b64 = base64.b64encode(f.read()).decode("ascii")
+        except Exception:
+            continue
+        rules.append(
+            "@font-face{font-family:'%s';font-weight:%d;font-style:%s;"
+            "font-display:swap;src:url(data:font/woff2;base64,%s) format('woff2')}"
+            % (family, weight, style, b64))
+    _font_css_cache = "\n".join(rules)
+    return _font_css_cache
 
 
 # ---------------------------------------------------------------------------
@@ -290,14 +328,17 @@ CSS = """
 }
 *{box-sizing:border-box}
 /* Readability, matching considus.com: functional text is DM Sans 400 with
-   0.04em tracking and 1.75 leading — Light 300 is display-only. */
+   0.04em tracking and 1.75 leading — Light 300 is display-only. The tracking
+   is set once here and inherited; anything that overrides it must have a
+   reason (labels run 0.12em because they're uppercase micro-type). */
 body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);
-     font-weight:400;font-size:15px;line-height:1.75;-webkit-font-smoothing:antialiased;
-     padding:48px 24px 80px;}
+     font-weight:400;font-size:15px;line-height:1.75;letter-spacing:.04em;
+     -webkit-font-smoothing:antialiased;padding:48px 24px 80px;}
 .wrap{max-width:920px;margin:0 auto}
-header{display:flex;align-items:center;gap:14px;margin-bottom:8px}
-header svg{width:34px;height:34px;flex:none}
-.word{font-family:var(--serif);font-weight:300;font-size:34px;letter-spacing:-0.01em;line-height:1}
+header{margin-bottom:8px}
+.brandlink{display:flex;align-items:center;gap:20px;color:inherit;text-decoration:none;width:fit-content}
+header svg{width:68px;height:auto;flex:none}
+.word{font-family:var(--serif);font-weight:300;font-size:68px;letter-spacing:-0.01em;line-height:1}
 h1{font-family:var(--serif);font-weight:300;font-size:40px;line-height:1.15;margin:26px 0 10px}
 .lede{color:var(--muted);max-width:62ch;margin:0 0 6px;font-size:0.95rem;line-height:1.75}
 .note{color:var(--muted);font-size:0.87rem;line-height:1.75;max-width:70ch}
@@ -310,9 +351,9 @@ h1{font-family:var(--serif);font-weight:300;font-size:40px;line-height:1.15;marg
 .row:last-child{border-bottom:none}
 label{display:block;font-size:0.68rem;font-weight:500;letter-spacing:.12em;
       text-transform:uppercase;color:var(--muted);margin-bottom:8px;line-height:1.4}
-select{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-family:var(--sans);font-size:1rem;font-weight:400;padding:3px 0}
+select{width:100%;background:transparent;border:none;outline:none;color:var(--text);font-family:var(--sans);font-size:1rem;font-weight:400;letter-spacing:.04em;padding:3px 0}
 input{width:100%;background:transparent;border:none;outline:none;color:var(--text);
-      font-family:var(--sans);font-size:1rem;font-weight:400;letter-spacing:.01em;padding:3px 0}
+      font-family:var(--sans);font-size:1rem;font-weight:400;letter-spacing:.04em;padding:3px 0}
 input::placeholder{color:var(--muted);opacity:.55;font-weight:400}
 input:focus{border-bottom:1px solid var(--accent);margin-bottom:-1px}
 .fixed{color:var(--muted);font-size:1rem;font-weight:400;padding:3px 0}
@@ -331,15 +372,42 @@ code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;
 ul{padding-left:20px;color:var(--muted);font-size:0.9rem} li{margin:7px 0}\n.sub{font-family:var(--sans);font-weight:500;font-size:0.72rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin:34px 0 12px}
 pre{overflow-x:auto;white-space:pre-wrap;background:var(--bg);border:1px solid var(--edge);border-radius:11px;padding:18px;font-size:0.82rem;line-height:1.6;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 pre code{background:none;border:none;padding:0;line-height:1.6}
+/* Footer mirrors considus.com's — same structure and scale, colours from this page. */
+footer{border-top:1px solid var(--edge);margin-top:72px;padding-top:36px;
+       display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:28px}
+.fbrand{display:flex;flex-direction:column;gap:8px}
+.flogo{display:flex;align-items:center;gap:8px;color:inherit;text-decoration:none;width:fit-content}
+.flogo svg{height:16px;width:auto;flex:none}
+.fword{font-family:var(--serif);font-weight:300;font-size:1.05rem;letter-spacing:-0.01em;
+       color:var(--muted);line-height:1}
+.ftag{font-family:var(--serif);font-style:italic;font-size:0.85rem;color:var(--muted);margin:0}
+.fcopy{font-size:0.7rem;color:var(--muted);margin:0}
+.flinks{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+.flinks a{font-size:0.78rem;color:var(--muted);text-decoration:none;transition:color 0.2s}
+.flinks a:hover{color:var(--accent)}
 """
 
 
 def page(body, title="Considus · Proton Bridge setup"):
     return """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>%s</title><style>%s</style></head><body><div class="wrap">
-<header>%s<span class="word">Considus</span></header>%s</div></body></html>""" % (
-        html.escape(title), CSS, brand_mark(), body)
+<title>%s</title><style>%s%s</style></head><body><div class="wrap">
+<header><a class="brandlink" href="https://considus.com">%s<span class="word">Considus</span></a></header>%s
+<footer aria-label="Site footer">
+  <div class="fbrand">
+    <a class="flogo" href="https://considus.com" aria-label="Considus">%s<span class="fword">Considus</span></a>
+    <p class="ftag">Software, considered.</p>
+    <p class="fcopy">&copy; 2026 Considus. All rights reserved.</p>
+  </div>
+  <div class="flinks">
+    <a href="https://catchlight.app">Catchlight</a>
+    <a href="https://considus.com/privacy">Privacy</a>
+    <a href="https://github.com/Considus/proton-bridge-mcp">GitHub</a>
+    <a href="mailto:hello@considus.com">hello@considus.com</a>
+  </div>
+</footer>
+</div></body></html>""" % (
+        html.escape(title), font_css(), CSS, brand_mark(), body, brand_mark())
 
 
 def row(label, name, value="", placeholder="", kind="text"):
@@ -412,23 +480,23 @@ secure credential store, and this page shuts down the moment setup completes.</p
 <p class="note" style="margin-top:26px">%s</p>
 """ % (html.escape(heading), lede, err, TOKEN,
        row("Hostname", "imap_host", e.get("PROTON_IMAP_HOST", "127.0.0.1")),
-       row("Port", "imap_port", e.get("PROTON_IMAP_PORT", ""), "from Bridge"),
+       row("Port", "imap_port", e.get("PROTON_IMAP_PORT", "1143"), "from Bridge"),
        row("Username", "imap_user", e.get("PROTON_USER", ""), "from Bridge"),
        row("Password", "imap_pass", "", pw_ph, "password"),
-       select_row("Security", "imap_security", [('auto', 'Automatic (by port)'), ('starttls', 'STARTTLS'), ('ssl', 'SSL / TLS')], e.get("PROTON_IMAP_SECURITY", "auto")),
+       select_row("Security", "imap_security", [('starttls', 'STARTTLS'), ('ssl', 'SSL / TLS'), ('auto', 'Automatic (by port)')], e.get("PROTON_IMAP_SECURITY", "starttls")),
        row("Hostname", "smtp_host", e.get("PROTON_SMTP_HOST", "127.0.0.1")),
-       row("Port", "smtp_port", e.get("PROTON_SMTP_PORT", ""), "from Bridge"),
+       row("Port", "smtp_port", e.get("PROTON_SMTP_PORT", "1025"), "from Bridge"),
        row("Username", "smtp_user",
            e.get("PROTON_SMTP_USER") or e.get("PROTON_USER", ""), "from Bridge"),
        row("Password", "smtp_pass", "", pw_ph, "password"),
-       select_row("Security", "smtp_security", [('auto', 'Automatic (by port)'), ('starttls', 'STARTTLS'), ('ssl', 'SSL / TLS')], e.get("PROTON_SMTP_SECURITY", "auto")),
+       select_row("Security", "smtp_security", [('starttls', 'STARTTLS'), ('ssl', 'SSL / TLS'), ('auto', 'Automatic (by port)')], e.get("PROTON_SMTP_SECURITY", "starttls")),
        html.escape(e.get("PROTON_ALIAS_FROM", "")),
        "Save changes" if updating else "Verify and finish setup",
        "Both connections are re-tested before anything is saved."
        if updating else
-       "Nothing is pre-filled except the hostname: Bridge assigns its own ports and "
-       "credentials, so every value should be read from Bridge rather than assumed. "
-       "Both connections are tested before anything is saved."))
+       "The hostname, ports and security are pre-filled with Bridge's usual defaults, "
+       "but Bridge assigns its own, so check every value against what Bridge shows and "
+       "change whatever differs. Both connections are tested before anything is saved."))
 
 
 def rerun_command():
