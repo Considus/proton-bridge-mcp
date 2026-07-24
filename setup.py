@@ -397,7 +397,7 @@ def page(body, title="Considus · Proton Bridge setup"):
   <div class="fbrand">
     <a class="flogo" href="https://considus.com" aria-label="Considus">%s<span class="fword">Considus</span></a>
     <p class="ftag">Software, considered.</p>
-    <p class="fcopy">&copy; 2026 Considus. All rights reserved.</p>
+    <p class="fcopy">&copy; 2026 Considus. Apache 2.0 licensed.</p>
   </div>
   <div class="flinks">
     <a href="https://catchlight.app">Catchlight</a>

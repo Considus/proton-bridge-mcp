@@ -214,6 +214,12 @@ On Windows:
 
 They cover attachment classification, the write sandbox, the recipient rules and the MCP protocol itself. None of them need Bridge running or a real account.
 
+## Support
+
+This is free and stays that way. Apache 2.0 means you can take it, build on it, and ship it commercially without owing anything back, which is deliberate.
+
+If it saved you an afternoon, there's [buymeacoffee.com/considus](https://buymeacoffee.com/considus). If it didn't, opening an issue when something breaks is worth more than the coffee.
+
 ## Licence
 
-Apache 2.0. See [LICENSE](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE) for the terms and [NOTICE](NOTICE) for the attribution you need to carry with it. The bundled fonts are licensed separately under the SIL Open Font License 1.1, in [assets/fonts/OFL.txt](assets/fonts/OFL.txt).
