@@ -158,7 +158,11 @@ Restart the app afterwards, MCP servers load at startup.
 
 ## Where things live
 
-Passwords sit in your operating system's credential store, Keychain, Credential Manager or Secret Service depending on what you're running. Everything else goes in `settings.json` next to the server, owner-readable only, no secrets in it. Environment variables override the file if you'd rather configure it that way, and `.env.example` lists all of them.
+Passwords sit in your operating system's credential store, Keychain, Credential Manager or Secret Service depending on what you're running. Everything else goes in `settings.json` next to the server, owner-readable only, no secrets in it. Environment variables override the file if you'd rather configure it that way, and `.env.example` covers the ones most people need. The rest are named where they come up in this README.
+
+Using it writes three more files, all next to the server and all owner-readable only. `state.json` keeps polling cursors and rate counters, `audit.log` records everything that changed something, and saved attachments land in `attachments/` until the TTL sweeps them. Each one has an override, `PROTON_STATE_FILE`, `PROTON_AUDIT_LOG` and `PROTON_ATTACH_DIR`, so none of them are stuck where they land by default.
+
+`audit.log` is the one worth a thought about where it sits. It keeps recipient addresses, subject lines and folder names in the clear, message bodies never, so over time it accumulates a record of who you write to without ever becoming a second copy of your mail. It rotates at 5MB and nothing expires by age, so the record runs as far back as your last 5MB of activity. That makes the folder you cloned into a question rather than a given. If it gets backed up, synced or indexed, the metadata goes with it, and pointing `PROTON_AUDIT_LOG` at somewhere outside that tree keeps the record on the machine that made it. On macOS a directory under `~/Library/Application Support/` that you exclude from Time Machine does the job, and excluding the directory rather than the file matters, because the rotated `audit.log.1` is a new file that needs to inherit the exclusion.
 
 ## Security
 
@@ -186,7 +190,7 @@ Worth being straight about its edges, because it's a strong backstop rather than
 
 **Sending always stops.** `send`, `forward` and `create_folder_or_label` refuse unless the assistant passes `confirmed=true`, which it should only do after showing you the exact recipient, subject and body. That one is a speed bump rather than a wall, an assistant that had been fully talked round could set it, which is exactly why the address rule above exists as well.
 
-**Everything that changes something is logged.** Sends, moves, labels, drafts, new folders, saved attachments, each one appended to `audit.log` next to the server as a single line of JSON, owner-readable only. Message bodies are never written, only their length, so the log tells you what happened without quietly becoming a second copy of your mailbox. Refusals are recorded too, which is the half you'd actually want after something odd. Turn it off with `PROTON_AUDIT=0` if you'd rather.
+**Everything that changes something is logged.** Sends, moves, labels, drafts, new folders, saved attachments, each one appended to `audit.log` as a single line of JSON, owner-readable only. It sits next to the server unless `PROTON_AUDIT_LOG` says otherwise, and [Where things live](#where-things-live) is worth reading on why you might move it. Message bodies are never written, only their length, so the log tells you what happened without quietly becoming a second copy of your mailbox. Recipients and subjects are written in full though, because a log that says a send happened but not to whom is no use after something odd. Refusals are recorded too, which is the half you'd actually want. Turn it off with `PROTON_AUDIT=0` if you'd rather.
 
 **Anything can be previewed first.** Every tool that changes something takes `dry_run=true`. You get the exact message that would go out, or the actual subject and sender of the mail that would move, and nothing happens. A preview needs no confirmation, since a preview is harmless, but it still runs every check, so if the real thing would be refused the preview tells you that rather than showing you a comforting fiction.
 
