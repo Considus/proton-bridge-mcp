@@ -168,6 +168,8 @@ Using it writes three more files, all next to the server and all owner-readable 
 
 The short version, it's local, it's careful about sending, and it assumes your mail is hostile.
 
+## Where your mail actually goes
+
 ### With Bridge, nothing leaves your machine
 
 Bridge does the decryption on your own computer and uses IMAP and SMTP to your computer's loopback address, so the server talks to your machine and nowhere else. The setup page loads no fonts, no scripts and no images from anywhere either.
@@ -177,6 +179,8 @@ Point it at a mailbox in the cloud instead and it works fine, but that sentence 
 ### Certificates are checked, except where checking them would be meaningless
 
 Bridge serves a self-signed certificate on loopback, so verifying it against a public certificate authority proves nothing and is skipped. Every other host is verified properly. That distinction matters because the hostname is yours to set, so this can be pointed at a mail server across the internet, and an unverified connection there is exactly the hole someone would walk through. If a host really can't present a matching certificate you can name it in `PROTON_TLS_INSECURE_HOSTS`, which excuses that one host and nothing else.
+
+## When a message tries to give orders
 
 ### Your mail is untrusted input
 
@@ -188,6 +192,8 @@ Anything in a From, To, Cc or Reply-To header is a real correspondent and you ca
 
 Worth being straight about its edges, because it's a strong backstop rather than a force field. An address is only refused if it was seen in content the assistant actually read this session, so a recipient that turned up in no read message isn't being matched against anything. And an address an attacker plants in a header is treated as a correspondent from then on, say by CCing themselves on a message you open. The two hard limits are the sender allowlist and `PROTON_ALLOWED_RECIPIENTS`. This rule narrows the easy exfiltration route rather than sealing every one.
 
+## Reading mail without acting on it
+
 ### Unsubscribing is mostly advice
 
 `unsubscribe` reads the List-Unsubscribe header and tells you what's on offer. It will send the email form if you ask it to, but it never opens the web link, because this server talks to Bridge on your own machine and nothing else, and quietly fetching a URL out of a message would break that and confirm to the sender that you read it. It also checks who was actually subscribed. Mail that came through an alias was sent to the alias, not to you, so unsubscribing from your own address usually matches nothing and disabling the alias is the better answer. It says so rather than sending something that won't work.
@@ -195,6 +201,8 @@ Worth being straight about its edges, because it's a strong backstop rather than
 ### Checking whether mail is what it says it is
 
 `get_headers` reports the SPF, DKIM and DMARC verdicts the receiving server reached, and points out a From domain that doesn't match the Return-Path. It won't cry wolf over your own aliases though. Mail forwarded through SimpleLogin always has a Reply-To and Return-Path that differ from the sender, so it says as much rather than flagging it, because a warning that fires on ordinary mail teaches you to ignore warnings.
+
+## Nothing goes out quietly
 
 ### Replies keep an alias masked on their own
 
@@ -208,6 +216,8 @@ If a message came in through a SimpleLogin alias, `reply` answers the reverse-al
 
 `send`, `forward` and `create_folder_or_label` refuse unless the assistant passes `confirmed=true`, which it should only do after showing you the exact recipient, subject and body. That one is a speed bump rather than a wall, an assistant that had been fully talked round could set it, which is exactly why the address rule above exists as well.
 
+## What's recorded, and what you can preview
+
 ### Everything that changes something is logged
 
 Sends, moves, labels, drafts, new folders, saved attachments, each one appended to `audit.log` as a single line of JSON, owner-readable only. It sits next to the server unless `PROTON_AUDIT_LOG` says otherwise, and [Where things live](#where-things-live) is worth reading on why you might move it. Message bodies are never written, only their length, so the log tells you what happened without quietly becoming a second copy of your mailbox. Recipients and subjects are written in full though, because a log that says a send happened but not to whom is no use after something odd. Refusals are recorded too, which is the half you'd actually want. Turn it off with `PROTON_AUDIT=0` if you'd rather.
@@ -219,6 +229,8 @@ Every tool that changes something takes `dry_run=true`. You get the exact messag
 ### Batches are narrower than they look
 
 The bulk tools only accept explicit numbered messages, never "everything in this folder", and they stop at 50 a call. Bulk moves need confirming on top of the preview, because marking something read is easy to undo and moving 50 messages isn't.
+
+## Limits on what it can do at all
 
 ### Three settings, not two
 
