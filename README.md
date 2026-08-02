@@ -89,19 +89,40 @@ Labels are the one place the two differ. Proton keeps them in their own namespac
 
 Set the hostname and ports to whatever your provider gave you. There's no autodiscovery here. Nothing guesses the server name from your email domain, and there's no lookup of the usual `mail.` records, so you enter the exact values from your provider's IMAP/SMTP settings page, for example `mail.lcn.com` with its IMAP and SMTP ports. Once you've typed the name your operating system resolves it to an address the normal way. What isn't automated is working out *which* name to use. Security is worked out from the port, 993 and 465 mean TLS from the first byte, 143 and 587 mean it gets negotiated, and you can say which explicitly if your host is unusual. Plain unencrypted connections aren't offered, since sending your password in clear isn't a trade worth making.
 
-Go in with your eyes open on one thing. Every guarantee below still holds except the first one, because your mail now lives on a server you don't control and travels over the internet to get here. That's a fair trade if the alternative is no assistant access at all, it just isn't the same promise.
+Go in with your eyes open on one thing. Every guarantee in [Security](#security) still holds except the first one, because your mail now lives on a server you don't control and travels over the internet to get here. That's a fair trade if the alternative is no assistant access at all, it just isn't the same promise.
 
 ## Before you start
 
 You need Proton Mail Bridge installed, signed in, and running. Bridge is a paid feature, so a free Proton account can't use this. Open Bridge and find Mailbox details, that's where the hostname, ports, username and password come from. Bridge picks its own port numbers, they aren't always 1143 and 1025, so read them rather than assuming.
 
-You won't need to install Python first if you follow the `uv` route below, it fetches its own. Going the plain-Python route instead, you'll want Python 3.9 or newer. Either way, two small packages go into a local virtual environment, so they don't touch anything else on your system: `pypdf` reads the text out of PDFs, and `keyring` stores your password in the credential store on Linux and Windows. macOS has its own Keychain command built in, so `keyring` is optional there, but installing it does no harm.
+You won't need to install Python first if you follow the `uv` route, it fetches its own. Going the plain-Python route instead, you'll want Python 3.9 or newer. Either way, two small packages go into a local virtual environment, so they don't touch anything else on your system: `pypdf` reads the text out of PDFs, and `keyring` stores your password in the credential store on Linux and Windows. macOS has its own Keychain command built in, so `keyring` is optional there, but installing it does no harm.
 
 ## Install
 
-Run these on this computer, in its own terminal. That's Terminal on macOS, PowerShell on Windows. A cloud AI session won't do, because its commands run in a sandbox on someone else's machine, where Bridge isn't, and nothing ends up installed here. The server has to live on the same machine as Bridge and your assistant.
+It goes on this computer, the same machine as Bridge and your assistant. A cloud AI session won't do, because its commands run in a sandbox on someone else's machine, where Bridge isn't, and nothing ends up installed here.
 
 Clone it somewhere permanent, a folder in your home directory is right. Your assistant's config will point at this exact path, and the settings, audit log and saved attachments live next to the server, so a folder that later moves is a connection that breaks. Not Downloads, not a temp folder, not anywhere a cloud drive syncs.
+
+Both routes finish the same way. `setup.py` opens a small page in your browser, served from your own machine on a random port behind a single-use link. It shuts itself down when you're finished and it never logs anything you type. Copy the values across from Bridge, and it'll test both connections before it saves a thing. Your password goes into your computer's secure credential store, never into a file.
+
+Run it again any time. It notices you've set it up before, fills in what it already knows, and a blank password field means keep the one you've got.
+
+### Have an assistant do it
+
+Paste this into an AI assistant that runs shell commands **on this computer**, Claude Code or a desktop assistant with terminal access, not a chat on a website, whose commands run on a server far from your Bridge. Read what it proposes before you let it run.
+
+```
+Please install the Proton Bridge MCP server from https://github.com/Considus/proton-bridge-mcp
+on this computer, following the Install section of its README exactly. Clone it into a permanent
+folder in my home directory, create the virtual environment with pypdf and keyring installed,
+then run setup.py using that environment's own Python, and tell me the local link it prints so
+I can finish setup in my browser. Run the commands one at a time, not chained together, and show
+me each one before you run it.
+```
+
+### Or run the commands yourself
+
+In its own terminal, that's Terminal on macOS, PowerShell on Windows.
 
 You'll need `git` and [`uv`](https://astral.sh/uv), both free. Macs and most Linux machines have `git` already; Windows has neither, and `winget install Git.Git` followed by `winget install astral-sh.uv` in PowerShell puts that right, then open a fresh PowerShell window so they're found.
 
@@ -129,24 +150,7 @@ Run each line on its own rather than chaining them together. The stock Windows P
 
 That last line matters. Setup runs with the environment you just built, which is where `keyring` went, and that's how your password reaches the credential store on Windows and Linux. The system's own Python doesn't have it and can't save the password there.
 
-No `uv`? Use plain Python, 3.9 or newer. On macOS and Linux that's `python3 -m venv .venv` then `.venv/bin/python -m pip install pypdf keyring`. On Windows it's `python -m venv .venv` then `.venv\Scripts\python -m pip install pypdf keyring`. Then run setup with the environment's Python exactly as above. Drop `pypdf` and you lose PDF text extraction. Drop `keyring` and you lose saved-password storage on Linux and Windows.
-
-`setup.py` opens a small page in your browser. It's served from your own machine on a random port behind a single-use link, it shuts itself down when you're finished, and it never logs anything you type. Copy the values across from Bridge, and it'll test both connections before it saves a thing. Your password goes into your computer's secure credential store, never into a file.
-
-Run it again any time. It notices you've set it up before, fills in what it already knows, and a blank password field means keep the one you've got.
-
-### Install without a terminal
-
-If the commands above aren't your thing, paste this into an AI assistant that runs shell commands **on this computer**, Claude Code or a desktop assistant with terminal access, not a chat on a website, whose commands run on a server far from your Bridge. Read what it proposes before you let it run.
-
-```
-Please install the Proton Bridge MCP server from https://github.com/Considus/proton-bridge-mcp
-on this computer, following the Install section of its README exactly. Clone it into a permanent
-folder in my home directory, create the virtual environment with pypdf and keyring installed,
-then run setup.py using that environment's own Python, and tell me the local link it prints so
-I can finish setup in my browser. Run the commands one at a time, not chained together, and show
-me each one before you run it.
-```
+No `uv`? Use plain Python, 3.9 or newer. On macOS and Linux that's `python3 -m venv .venv` then `.venv/bin/python -m pip install pypdf keyring`. On Windows it's `python -m venv .venv` then `.venv\Scripts\python -m pip install pypdf keyring`. Then run setup with the environment's Python exactly as shown. Drop `pypdf` and you lose PDF text extraction. Drop `keyring` and you lose saved-password storage on Linux and Windows.
 
 ## Connect it to your assistant
 
