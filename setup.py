@@ -403,6 +403,7 @@ def page(body, title="Considus · Proton Bridge setup"):
     <a href="https://catchlight.app">Catchlight</a>
     <a href="https://considus.com/privacy">Privacy</a>
     <a href="https://github.com/Considus/proton-bridge-mcp">GitHub</a>
+    <a href="https://buymeacoffee.com/considus">Buy me a coffee</a>
     <a href="mailto:hello@considus.com">hello@considus.com</a>
   </div>
 </footer>
