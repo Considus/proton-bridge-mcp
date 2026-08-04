@@ -227,6 +227,64 @@ class UidValidity(unittest.TestCase):
             server._select_checked(Bad("1"), "Nope", None)
 
 
+class FolderListing(unittest.TestCase):
+    """The hierarchy delimiter in a LIST response is whatever the server says.
+
+    Bridge reports "/", Dovecot reports ".", and a server with no hierarchy
+    reports NIL. Assuming "/" made every mailbox on a non-Bridge server vanish,
+    which left list_folders empty and search_all_mail searching nothing.
+    """
+
+    class FakeConn:
+        def __init__(self, lines):
+            self._lines = lines
+        def list(self):
+            return "OK", self._lines
+
+    BRIDGE = [b'(\\HasNoChildren) "/" "INBOX"',
+              b'(\\HasNoChildren) "/" "Folders/reference"',
+              b'(\\HasNoChildren) "/" "Labels/Trades"']
+    DOVECOT = [b'(\\HasChildren) "." "INBOX"',
+               b'(\\HasNoChildren \\Sent) "." "Sent Items"',
+               b'(\\HasNoChildren \\Trash) "." "Deleted Items"']
+
+    def test_slash_delimiter_is_read(self):
+        got = server._list_folders(self.FakeConn(self.BRIDGE))
+        self.assertEqual(got, ["INBOX", "Folders/reference", "Labels/Trades"])
+
+    def test_dot_delimiter_is_read(self):
+        got = server._list_folders(self.FakeConn(self.DOVECOT))
+        self.assertEqual(got, ["INBOX", "Sent Items", "Deleted Items"])
+
+    def test_nil_delimiter_and_unquoted_name(self):
+        conn = self.FakeConn([b'(\\Noinferiors) NIL INBOX'])
+        self.assertEqual(server._list_folders(conn), ["INBOX"])
+
+    def test_names_may_contain_spaces(self):
+        conn = self.FakeConn([b'(\\HasNoChildren) "." "Junk E-mail"'])
+        self.assertEqual(server._list_folders(conn), ["Junk E-mail"])
+
+    def test_flags_are_lowercased_for_special_use(self):
+        got = server._list_mailboxes(self.FakeConn(self.DOVECOT))
+        self.assertIn(("\\hasnochildren \\sent", "Sent Items"), got)
+
+    def test_special_folder_found_by_flag_whatever_the_delimiter(self):
+        self.assertEqual(
+            server._special_folder(self.FakeConn(self.DOVECOT), "sent"),
+            "Sent Items")
+
+    def test_unparsable_lines_are_skipped_not_fatal(self):
+        conn = self.FakeConn([None, b"", b"* garbage",
+                              b'(\\HasNoChildren) "." "INBOX"'])
+        self.assertEqual(server._list_folders(conn), ["INBOX"])
+
+    def test_failed_list_returns_nothing(self):
+        class Bad(self.FakeConn):
+            def list(self):
+                return "NO", None
+        self.assertEqual(server._list_folders(Bad([])), [])
+
+
 class BulkGuards(unittest.TestCase):
     def test_rejects_non_numeric_uids(self):
         with self.assertRaises(server.ToolError):

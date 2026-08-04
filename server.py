@@ -447,20 +447,43 @@ def _folder_quote(name):
     return _imap_quote(name, "folder name")
 
 
+# A LIST response is: (flags) delimiter name
+# The delimiter is whatever the server reports and must be read, not assumed:
+# Proton Bridge says "/", Dovecot (e.g. LCN) says ".", and a server with no
+# hierarchy at all says NIL. Splitting on a hardcoded ' "/" ' silently discarded
+# every mailbox on any non-Proton server. The name is usually quoted but a bare
+# atom is legal.
+_LIST_LINE = re.compile(
+    r'^\s*\((?P<flags>[^)]*)\)\s+(?:"(?P<delim>(?:[^"\\]|\\.)*)"|NIL)\s+'
+    r'(?:"(?P<qname>(?:[^"\\]|\\.)*)"|(?P<aname>\S+))\s*$'
+)
+
+
+def _parse_list_line(raw):
+    """-> (flags_lower, name) for one LIST line, or None if it doesn't parse."""
+    if raw is None:
+        return None
+    line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    m = _LIST_LINE.match(line)
+    if not m:
+        return None
+    name = m.group("qname")
+    if name is None:
+        name = m.group("aname")
+    else:
+        name = name.replace('\\"', '"').replace("\\\\", "\\")
+    return m.group("flags").lower(), name
+
+
 def _list_folders(conn):
     typ, data = conn.list()
     folders = []
     if typ != "OK" or not data:
         return folders
     for raw in data:
-        if raw is None:
-            continue
-        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-        # format: (\HasNoChildren) "/" "Folder Name"
-        parts = line.split(' "/" ')
-        if len(parts) == 2:
-            name = parts[1].strip().strip('"')
-            folders.append(name)
+        parsed = _parse_list_line(raw)
+        if parsed is not None:
+            folders.append(parsed[1])
     return folders
 
 
@@ -471,14 +494,9 @@ def _list_mailboxes(conn):
     if typ != "OK" or not data:
         return out
     for raw in data:
-        if raw is None:
-            continue
-        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-        parts = line.split(' "/" ')
-        if len(parts) != 2:
-            continue
-        flags = parts[0][parts[0].find("(") + 1:parts[0].rfind(")")].lower()
-        out.append((flags, parts[1].strip().strip('"')))
+        parsed = _parse_list_line(raw)
+        if parsed is not None:
+            out.append(parsed)
     return out
 
 
