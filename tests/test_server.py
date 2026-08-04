@@ -1022,6 +1022,65 @@ class DeleteLabel(unittest.TestCase):
                 {"labels": ["l%d" % i for i in range(server.MAX_BULK + 1)]})
 
 
+class SpecialFolders(unittest.TestCase):
+    """Not every server advertises RFC 6154 flags, so the name fallback is the
+    only thing standing between a send and a missing copy in Sent."""
+
+    class FakeConn:
+        """Lists mailboxes with no SPECIAL-USE flags, forcing the name path."""
+
+        def __init__(self, names):
+            self._names = names
+
+        def list(self):
+            return "OK", ['(\\HasNoChildren) "/" "%s"' % n for n in self._names]
+
+    # What an Exchange-flavoured host actually calls them.
+    EXCHANGE = ["INBOX", "Sent Items", "Drafts", "Deleted Items", "Junk E-mail"]
+
+    def test_sent_items_is_found(self):
+        conn = self.FakeConn(self.EXCHANGE)
+        self.assertEqual(server._special_folder(conn, "sent"), "Sent Items")
+
+    def test_junk_email_is_found_hyphenated(self):
+        conn = self.FakeConn(self.EXCHANGE)
+        self.assertEqual(server._special_folder(conn, "junk"), "Junk E-mail")
+
+    def test_junk_email_is_found_unhyphenated(self):
+        conn = self.FakeConn(["INBOX", "Junk Email"])
+        self.assertEqual(server._special_folder(conn, "junk"), "Junk Email")
+
+    def test_deleted_items_and_drafts_still_found(self):
+        conn = self.FakeConn(self.EXCHANGE)
+        self.assertEqual(server._special_folder(conn, "trash"), "Deleted Items")
+        self.assertEqual(server._special_folder(conn, "drafts"), "Drafts")
+
+    def test_proton_names_still_win(self):
+        """The existing spellings must not regress."""
+        conn = self.FakeConn(["INBOX", "Sent", "Trash", "Spam", "All Mail"])
+        for kind, want in (("sent", "Sent"), ("trash", "Trash"),
+                           ("junk", "Spam"), ("all", "All Mail")):
+            self.assertEqual(server._special_folder(conn, kind), want)
+
+    def test_matching_is_case_insensitive(self):
+        conn = self.FakeConn(["INBOX", "SENT ITEMS"])
+        self.assertEqual(server._special_folder(conn, "sent"), "SENT ITEMS")
+
+    def test_flag_still_beats_the_name(self):
+        class Flagged(self.FakeConn):
+            def list(self):
+                return "OK", [r'(\HasNoChildren) "/" "Sent Items"',
+                              r'(\HasNoChildren \Sent) "/" "Archive of sent"']
+        got = server._special_folder(Flagged([]), "sent")
+        self.assertEqual(got, "Archive of sent")
+
+    def test_absent_mailbox_still_raises(self):
+        conn = self.FakeConn(["INBOX"])
+        with self.assertRaises(server.ToolError) as cm:
+            server._special_folder(conn, "sent")
+        self.assertIn("list_folders", str(cm.exception))
+
+
 class Config(unittest.TestCase):
     def test_env_beats_settings_file(self):
         tmp = tempfile.mkdtemp()
