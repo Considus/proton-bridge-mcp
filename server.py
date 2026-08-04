@@ -483,13 +483,16 @@ def _list_mailboxes(conn):
 
 
 # SPECIAL-USE flag -> fallback names, for servers that don't advertise flags
-# and for localised Bridge installs.
+# and for localised Bridge installs. The names have to cover the Exchange
+# spellings as well as the Proton and Gmail ones: a Dovecot host that lists
+# "Sent Items" without a \Sent flag would otherwise fail the lookup with the
+# mailbox sitting right there, and a send would succeed with no copy filed.
 _SPECIAL = {
     "all": (r"\all", ("all mail", "archive")),
     "drafts": (r"\drafts", ("drafts",)),
-    "sent": (r"\sent", ("sent", "sent mail")),
+    "sent": (r"\sent", ("sent", "sent mail", "sent items")),
     "trash": (r"\trash", ("trash", "deleted items")),
-    "junk": (r"\junk", ("spam", "junk")),
+    "junk": (r"\junk", ("spam", "junk", "junk e-mail", "junk email")),
 }
 
 
