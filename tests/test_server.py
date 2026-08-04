@@ -284,6 +284,51 @@ class FolderListing(unittest.TestCase):
                 return "NO", None
         self.assertEqual(server._list_folders(Bad([])), [])
 
+    # The unquoting is the fiddly part, so it gets the awkward cases.
+
+    def test_backslash_delimiter(self):
+        conn = self.FakeConn([rb'(\HasNoChildren) "\\" "INBOX\\Work"'])
+        self.assertEqual(server._list_folders(conn), [r"INBOX\Work"])
+
+    def test_escaped_quote_in_a_name_survives(self):
+        conn = self.FakeConn([rb'(\HasNoChildren) "/" "He said \"hi\""'])
+        self.assertEqual(server._list_folders(conn), ['He said "hi"'])
+
+    def test_name_containing_the_old_split_pattern(self):
+        """This one used to split into three parts and vanish."""
+        conn = self.FakeConn([rb'(\HasNoChildren) "/" "odd \"/\" name"'])
+        self.assertEqual(server._list_folders(conn), ['odd "/" name'])
+
+    def test_empty_flags(self):
+        self.assertEqual(
+            server._list_folders(self.FakeConn([rb'() "." "INBOX"'])), ["INBOX"])
+
+    def test_empty_quoted_name(self):
+        conn = self.FakeConn([rb'(\Noselect) "." ""'])
+        self.assertEqual(server._list_folders(conn), [""])
+
+    def test_surrounding_whitespace_is_tolerated(self):
+        conn = self.FakeConn([b'  (\\HasNoChildren) "." "INBOX"   '])
+        self.assertEqual(server._list_folders(conn), ["INBOX"])
+
+    def test_noselect_survives_parsing(self):
+        """search_all_mail filters on this flag, so losing it would widen a
+        search onto mailboxes that cannot be opened."""
+        boxes = server._list_mailboxes(
+            self.FakeConn([rb'(\Noselect \HasChildren) "." "INBOX.Archive"']))
+        self.assertEqual(len(boxes), 1)
+        self.assertIn("noselect", boxes[0][0])
+
+    def test_non_string_entries_are_skipped_not_fatal(self):
+        conn = self.FakeConn([42, rb'(\HasNoChildren) "." "INBOX"'])
+        self.assertEqual(server._list_folders(conn), ["INBOX"])
+
+    def test_special_folder_falls_back_to_the_name(self):
+        """No SPECIAL-USE flags advertised, so the name path has to work."""
+        conn = self.FakeConn([rb'(\HasChildren) "." "INBOX"',
+                              rb'(\HasNoChildren) "." "Sent"'])
+        self.assertEqual(server._special_folder(conn, "sent"), "Sent")
+
 
 class BulkGuards(unittest.TestCase):
     def test_rejects_non_numeric_uids(self):
