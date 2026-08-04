@@ -160,6 +160,19 @@ It works this way round on purpose. Every client keeps its MCP config somewhere 
 
 Restart the app afterwards, MCP servers load at startup.
 
+## Updating
+
+There's no package and no installer, so there's nothing to download. The server runs as `server.py` out of the directory you cloned into, which makes an update a pull and a restart.
+
+```bash
+cd proton-bridge-mcp
+git pull
+```
+
+The restart is the part that catches people out. A stdio MCP server is a long-running process, and it reads `server.py` once, when the app starts it. Changing the file underneath a server that's already running does nothing at all, so quit the app properly and open it again. Closing the window isn't enough on macOS, and neither is closing the last tab on Windows if it leaves the app in the tray.
+
+Releases are tagged, and the releases page on GitHub says what changed in each one and whether it affects you. Plenty of what lands here only matters on a mailbox that isn't Proton, so a release you can safely ignore is a normal outcome rather than a sign something went wrong. `git pull` puts you on the latest `main`, which is sometimes ahead of the newest tag.
+
 ## Where things live
 
 Passwords sit in your operating system's credential store, Keychain, Credential Manager or Secret Service depending on what you're running. Everything else goes in `settings.json` next to the server, owner-readable only, no secrets in it. Environment variables override the file if you'd rather configure it that way, and `.env.example` covers the ones most people need. The rest are named where they come up in this README.
