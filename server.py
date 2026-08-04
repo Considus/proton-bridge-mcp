@@ -461,9 +461,13 @@ _LIST_LINE = re.compile(
 
 def _parse_list_line(raw):
     """-> (flags_lower, name) for one LIST line, or None if it doesn't parse."""
-    if raw is None:
+    if not isinstance(raw, (bytes, bytearray, str)):
+        # None, or the tuple imaplib yields when a name arrives as a literal.
+        # That needs UTF8=ACCEPT, which this server never enables, so it should
+        # not be reachable -- skip it rather than raise if it ever is.
         return None
-    line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    line = raw.decode("utf-8", "replace") if isinstance(
+        raw, (bytes, bytearray)) else raw
     m = _LIST_LINE.match(line)
     if not m:
         return None
