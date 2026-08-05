@@ -115,7 +115,7 @@ ATTACH_DIR = _cfg("PROTON_ATTACH_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "attachments")
 
 SERVER_NAME = "proton-mail"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 DEFAULT_PROTOCOL = "2025-06-18"
 
 
@@ -3395,8 +3395,97 @@ elif MODE == "organise":
     # Everything except putting mail on the wire.
     TOOLS = [t for t in TOOLS if t["name"] not in _ORGANISE_ONLY]
 
+# ----------------------------------------------------------------------------
+# Tool annotations
+# ----------------------------------------------------------------------------
+# Not derived from _MUTATING, on purpose. That set is about mail: which tools
+# change the mailbox, and so which ones a mode should take away. readOnlyHint
+# asks a wider question, whether a tool changes anything at all, and three
+# tools fall the other side of that line. purge_attachments deletes files off
+# the disk and never touches the mailbox. poll_folder and ack_folder both write
+# the local checkpoint. Reusing _MUTATING here would have declared all three
+# read-only, which is the kind of wrong a reviewer takes at face value.
+_READ_ONLY = {"list_folders", "folder_status", "search_mail", "search_all_mail",
+              "get_headers", "read_message", "list_attachments",
+              "read_attachment", "view_attachment", "find_thread"}
+
+# Destroys something, or puts mail beyond recall.
+_DESTRUCTIVE = {"send", "forward", "reply", "reply_all", "send_draft",
+                "unsubscribe", "update_draft", "delete_draft", "delete_label",
+                "bulk_delete_labels", "purge_attachments"}
+
+# Running it twice lands in the same place as running it once.
+_IDEMPOTENT = {"ack_folder", "mark", "bulk_mark", "apply_label",
+               "bulk_apply_label", "remove_label", "bulk_remove_label",
+               "move_to_folder", "bulk_move", "create_folder_or_label",
+               "delete_label", "bulk_delete_labels", "delete_draft",
+               "update_draft", "save_attachment", "purge_attachments"}
+
+# Everything else reaches the mailbox, and a mailbox is whoever writes to it.
+_LOCAL_ONLY = {"purge_attachments"}
+
+TITLES = {
+    "list_folders": "List folders and labels",
+    "folder_status": "Folder status",
+    "poll_folder": "Poll for new mail",
+    "ack_folder": "Acknowledge poll checkpoint",
+    "search_mail": "Search a folder",
+    "search_all_mail": "Search all mail",
+    "get_headers": "Get message headers",
+    "read_message": "Read a message",
+    "list_attachments": "List attachments",
+    "read_attachment": "Read an attachment",
+    "view_attachment": "View an image attachment",
+    "save_attachment": "Save an attachment",
+    "purge_attachments": "Delete saved attachments",
+    "find_thread": "Find a thread",
+    "bulk_mark": "Mark messages in bulk",
+    "bulk_apply_label": "Apply a label in bulk",
+    "bulk_move": "Move messages in bulk",
+    "reply": "Reply",
+    "reply_all": "Reply to all",
+    "create_draft": "Create a draft",
+    "update_draft": "Update a draft",
+    "delete_draft": "Delete a draft",
+    "send_draft": "Send a draft",
+    "unsubscribe": "Unsubscribe",
+    "mark": "Mark a message",
+    "apply_label": "Apply a label",
+    "remove_label": "Remove a label",
+    "bulk_remove_label": "Remove a label in bulk",
+    "move_to_folder": "Move to folder",
+    "create_folder_or_label": "Create a folder or label",
+    "delete_label": "Delete a label",
+    "bulk_delete_labels": "Delete labels in bulk",
+    "send": "Send mail",
+    "forward": "Forward",
+}
+
+
+def _annotations(name):
+    """MCP tool annotations. readOnlyHint is the one a client acts on, and the
+    other three only mean anything when it is false, so they are left off
+    read-only tools rather than set to a value nothing reads.
+
+    title is repeated inside annotations as well as alongside it. The protocol
+    grew a top-level title and older clients still read the one in here, and a
+    duplicated string is cheaper than a tool that shows up unnamed."""
+    ann = {"title": TITLES[name],
+           "readOnlyHint": name in _READ_ONLY,
+           "openWorldHint": name not in _LOCAL_ONLY}
+    if name not in _READ_ONLY:
+        ann["destructiveHint"] = name in _DESTRUCTIVE
+        ann["idempotentHint"] = name in _IDEMPOTENT
+    return ann
+
+
 HANDLERS = {t["name"]: t["handler"] for t in TOOLS}
-TOOL_DEFS = [{k: t[k] for k in ("name", "description", "inputSchema")} for t in TOOLS]
+TOOL_DEFS = [{"name": t["name"],
+              "title": TITLES[t["name"]],
+              "description": t["description"],
+              "inputSchema": t["inputSchema"],
+              "annotations": _annotations(t["name"])}
+             for t in TOOLS]
 
 
 # ----------------------------------------------------------------------------

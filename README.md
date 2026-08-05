@@ -293,6 +293,38 @@ On Windows:
 
 They cover attachment classification, the write sandbox, the recipient rules and the MCP protocol itself. None of them need Bridge running or a real account.
 
+## Privacy Policy
+
+There is no server on our side. Your mail goes from Proton to Bridge to this server and back again, all of it over `127.0.0.1`, all of it on the computer in front of you. Considus runs nothing your mail passes through, so there is nothing for us to look at even if we wanted to, and no account to make, no telemetry, no crash reporting and no licence check that phones home.
+
+### What it reads
+
+Whatever you ask it to, and only while it answers. Folder names, headers, message bodies and attachments, all read live over Bridge each time. There is no database and nothing is indexed, so what a tool read is in your assistant's conversation and nowhere else, and when that conversation goes it goes with it.
+
+### What it writes, and where
+
+An audit log records anything that changed something, which is there so you can go back afterwards and see what was done in your name. It holds the tool, the time and the message it acted on, and never the body of a message or a note you wrote. It caps at 5MB and rotates, and `PROTON_AUDIT=0` turns it off.
+
+Saved attachments land in the attachments folder and nowhere else, unless you widen that yourself.
+
+A settings file keeps the dull half of your setup, the mailbox address and the ports Bridge gave you.
+
+A checkpoint file remembers how far the last poll got, so switching polling on doesn't replay a year of backlog at you.
+
+All four sit next to the server on your own disk, they are yours, and you can delete any of them whenever you like. Nothing is kept anywhere else, because there is nowhere else, and that is also the answer on retention. We hold nothing, so we have nothing to keep or to delete on your behalf.
+
+### Your password is not in any of that
+
+It goes to your operating system's credential store, Keychain on macOS and the `keyring` equivalent on Windows and Linux. Install the bundle instead of cloning and you can type it into the setup panel, in which case your assistant stores it the same way. Either route, it is never written to a file here, never written to the audit log, and never handed back to the model.
+
+### Nobody else gets any of it
+
+No analytics, no error reporting, no third party of any kind, and nothing shared with Proton beyond the mail you were already sending them. The only connections this makes are to Bridge on loopback, and it will not fetch a web address it found inside a message even when that address is an unsubscribe link, because quietly reaching out to a host named in an email would confirm you read it.
+
+### If you want to ask about any of this
+
+Write to privacy@considus.com, or open an issue at [github.com/Considus/proton-bridge-mcp/issues](https://github.com/Considus/proton-bridge-mcp/issues). The Considus website policy covering considus.com itself is at [considus.com/privacy](https://considus.com/privacy/), and it is a separate document because it covers a separate thing.
+
 ## Support
 
 This is free and stays that way. Apache 2.0 means you can take it, build on it, and ship it commercially without owing anything back, which is deliberate.

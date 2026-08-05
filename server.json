@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.considus/proton-bridge-mcp",
+  "title": "Proton Bridge MCP",
+  "description": "Read, organise and carefully-gated send access to your Proton Mail over Proton Mail Bridge, without your mail leaving this machine.",
+  "version": "1.1.0",
+  "websiteUrl": "https://considus.com/proton-bridge-mcp/",
+  "repository": {
+    "url": "https://github.com/Considus/proton-bridge-mcp",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/Considus/proton-bridge-mcp/releases/download/v1.1.0/proton-bridge-mcp-1.1.0.mcpb",
+      "fileSha256": "d440d458e57e96b19b58184bc0c6a6e6e972cd29d37236690e801ce9f750748e",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1205,6 +1205,43 @@ class Config(unittest.TestCase):
     def test_sender_domain_is_derived_not_hardcoded(self):
         self.assertEqual(server._sender_domain("a@b.example"), "b.example")
 
+    def test_a_blank_env_var_counts_as_unset(self):
+        # A bundle install declares the optional fields up front, so a field the
+        # user left alone can still arrive as an empty string. Blank has to mean
+        # "not answered" and fall through to the settings file, not "" as a
+        # value that overrides it.
+        tmp = tempfile.mkdtemp()
+        settings = os.path.join(tmp, "settings.json")
+        with open(settings, "w") as f:
+            json.dump({"PROTON_IMAP_HOST": "127.0.0.1"}, f)
+        old = server.SETTINGS_FILE
+        try:
+            server.SETTINGS_FILE = settings
+            server._SETTINGS = server._load_settings()
+            os.environ["PROTON_IMAP_HOST"] = ""
+            self.assertEqual(server._cfg("PROTON_IMAP_HOST"), "127.0.0.1")
+        finally:
+            os.environ.pop("PROTON_IMAP_HOST", None)
+            server.SETTINGS_FILE = old
+            server._SETTINGS = server._load_settings()
+
+    def test_a_blank_password_falls_through_to_the_store(self):
+        # Same again, and this one matters more: an empty string returned as a
+        # password is an auth failure with a confusing message, where falling
+        # through finds the credential that setup.py stored.
+        try:
+            os.environ["PROTON_TEST_PW"] = ""
+            self.assertIsNone(
+                server._resolve_password("no-such-service-xyz",
+                                         "nobody@example.com", "PROTON_TEST_PW"))
+            os.environ["PROTON_TEST_PW"] = "actual-secret"
+            self.assertEqual(
+                server._resolve_password("no-such-service-xyz",
+                                         "nobody@example.com", "PROTON_TEST_PW"),
+                "actual-secret")
+        finally:
+            os.environ.pop("PROTON_TEST_PW", None)
+
 
 def rpc(requests, env=None):
     """Drive the server over stdio the way a real MCP client does."""
@@ -1270,6 +1307,135 @@ class Protocol(unittest.TestCase):
         res = [m for m in msgs if m.get("id") == 2][0]["result"]
         self.assertTrue(res.get("isError"))
         self.assertIn("confirmed", res["content"][0]["text"])
+
+
+class Annotations(unittest.TestCase):
+    """The Connectors Directory rejects a tool with no title or no hint, and a
+    wrong hint is worse than none: a client uses destructiveHint to decide what
+    to ask the user about before it runs."""
+
+    def test_every_tool_has_a_title(self):
+        for t in server.TOOLS:
+            self.assertIn(t["name"], server.TITLES)
+            self.assertTrue(server.TITLES[t["name"]].strip())
+
+    def test_titles_match_the_tool_list_exactly(self):
+        names = {t["name"] for t in server.TOOLS}
+        self.assertEqual(set(server.TITLES), names)
+
+    def test_classification_sets_name_real_tools(self):
+        names = {t["name"] for t in server.TOOLS}
+        for s in (server._READ_ONLY, server._DESTRUCTIVE,
+                  server._IDEMPOTENT, server._LOCAL_ONLY):
+            self.assertEqual(s - names, set())
+
+    def test_nothing_is_both_read_only_and_destructive(self):
+        self.assertEqual(server._READ_ONLY & server._DESTRUCTIVE, set())
+
+    def test_read_only_tools_omit_the_hints_that_mean_nothing(self):
+        for name in server._READ_ONLY:
+            ann = server._annotations(name)
+            self.assertTrue(ann["readOnlyHint"])
+            self.assertNotIn("destructiveHint", ann)
+            self.assertNotIn("idempotentHint", ann)
+
+    def test_writing_tools_declare_both_hints(self):
+        names = {t["name"] for t in server.TOOLS}
+        for name in names - server._READ_ONLY:
+            ann = server._annotations(name)
+            self.assertFalse(ann["readOnlyHint"])
+            self.assertIn("destructiveHint", ann)
+            self.assertIn("idempotentHint", ann)
+
+    def test_purge_attachments_is_destructive(self):
+        # It deletes files off the disk, and it is absent from _MUTATING
+        # because it never touches the mailbox. Deriving the hints from that
+        # set would have called it read-only.
+        ann = server._annotations("purge_attachments")
+        self.assertFalse(ann["readOnlyHint"])
+        self.assertTrue(ann["destructiveHint"])
+        self.assertFalse(ann["openWorldHint"])
+
+    def test_the_polling_pair_are_not_read_only(self):
+        # Both write the local checkpoint.
+        for name in ("poll_folder", "ack_folder"):
+            self.assertFalse(server._annotations(name)["readOnlyHint"])
+
+    def test_sending_is_destructive_and_not_idempotent(self):
+        for name in ("send", "forward", "reply", "reply_all", "send_draft"):
+            ann = server._annotations(name)
+            self.assertTrue(ann["destructiveHint"], name)
+            self.assertFalse(ann["idempotentHint"], name)
+
+    def test_tools_list_carries_title_and_annotations(self):
+        # TOOL_DEFS is built by naming the keys it copies, so a tool can be
+        # annotated correctly and still arrive bare. This is that regression.
+        msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}])
+        tools = [t for m in msgs if m.get("id") == 2 for t in m["result"]["tools"]]
+        self.assertTrue(tools)
+        for t in tools:
+            self.assertTrue(t.get("title"), t["name"])
+            self.assertIn("annotations", t)
+            self.assertIn("readOnlyHint", t["annotations"])
+        by_name = {t["name"]: t for t in tools}
+        self.assertTrue(by_name["read_message"]["annotations"]["readOnlyHint"])
+        self.assertTrue(by_name["send"]["annotations"]["destructiveHint"])
+
+    def test_annotations_survive_readonly_mode(self):
+        msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
+                   env={"PROTON_READONLY": "1"})
+        tools = [t for m in msgs if m.get("id") == 2 for t in m["result"]["tools"]]
+        self.assertTrue(tools)
+        for t in tools:
+            self.assertTrue(t.get("title"), t["name"])
+            self.assertIn("annotations", t)
+
+    def test_readonly_mode_is_about_the_mailbox_not_the_disk(self):
+        # readonly is defined by _MUTATING, which is a statement about mail.
+        # Three tools it keeps still write something: the polling pair move the
+        # local checkpoint, and purge_attachments deletes saved files. Pinned
+        # rather than quietly widened, because narrowing what a mode offers is
+        # a decision about the product. If _MUTATING changes, update this.
+        msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
+                   env={"PROTON_READONLY": "1"})
+        tools = [t for m in msgs if m.get("id") == 2 for t in m["result"]["tools"]]
+        writing = {t["name"] for t in tools if not t["annotations"]["readOnlyHint"]}
+        self.assertEqual(writing,
+                         {"poll_folder", "ack_folder", "purge_attachments"})
+
+
+class Manifest(unittest.TestCase):
+    """manifest.json is what a directory reviewer reads. If it stops describing
+    the server, the listing is wrong and nothing else notices."""
+
+    def setUp(self):
+        path = os.path.join(HERE, "manifest.json")
+        with open(path, encoding="utf-8") as f:
+            self.man = json.load(f)
+
+    def test_version_matches_the_server(self):
+        self.assertEqual(self.man["version"], server.SERVER_VERSION)
+
+    def test_tool_list_matches_the_server(self):
+        expected = [{"name": d["name"], "description": d["description"]}
+                    for d in server.TOOL_DEFS]
+        self.assertEqual(self.man["tools"], expected)
+
+    def test_privacy_policy_is_declared_over_https(self):
+        # A missing or incomplete privacy policy is an immediate rejection.
+        policies = self.man.get("privacy_policies") or []
+        self.assertTrue(policies)
+        for url in policies:
+            self.assertTrue(url.startswith("https://"), url)
+
+    def test_the_password_field_is_marked_sensitive_and_optional(self):
+        pw = self.man["user_config"]["proton_password"]
+        self.assertTrue(pw["sensitive"])
+        self.assertFalse(pw["required"])
+
+    def test_readme_has_a_privacy_policy_section(self):
+        with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
+            self.assertIn("## Privacy Policy", f.read())
 
 
 if __name__ == "__main__":
