@@ -9,3 +9,4 @@ attachments/
 settings.json
 audit.log*
 state.json
+dist/

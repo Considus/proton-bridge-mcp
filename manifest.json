@@ -1,0 +1,260 @@
+{
+  "$schema": "https://raw.githubusercontent.com/anthropics/mcpb/main/dist/mcpb-manifest.schema.json",
+  "manifest_version": "0.3",
+  "name": "proton-bridge-mcp",
+  "display_name": "Proton Bridge MCP",
+  "version": "1.1.0",
+  "description": "Read, organise and carefully-gated send access to your Proton Mail, without your mail leaving this machine.",
+  "long_description": "Proton is end-to-end encrypted, which is why there is no API to plug an assistant into. Proton Mail Bridge decrypts locally and speaks ordinary IMAP and SMTP to 127.0.0.1, so this server reads and files your mail without sending it anywhere. Search and read, pull text out of PDF attachments, tag and file in bulk, reply in thread, and send or forward behind a confirmation step. Requires Proton Mail Bridge, which is a paid Proton feature.\n\nUnofficial, and not affiliated with or endorsed by Proton AG.",
+  "author": {
+    "name": "Considus",
+    "url": "https://considus.com"
+  },
+  "homepage": "https://considus.com/proton-bridge-mcp/",
+  "documentation": "https://considus.com/proton-bridge-mcp/install/",
+  "support": "https://github.com/Considus/proton-bridge-mcp/issues",
+  "icon": "assets/considus-icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Considus/proton-bridge-mcp"
+  },
+  "license": "Apache-2.0",
+  "privacy_policies": [
+    "https://considus.com/proton-bridge-mcp/privacy/"
+  ],
+  "keywords": [
+    "proton",
+    "proton-mail",
+    "email",
+    "imap",
+    "smtp",
+    "privacy",
+    "local-first"
+  ],
+  "server": {
+    "type": "python",
+    "entry_point": "server.py",
+    "mcp_config": {
+      "command": "python3",
+      "args": [
+        "${__dirname}/server.py"
+      ],
+      "env": {
+        "PYTHONPATH": "${__dirname}/lib",
+        "PROTON_USER": "${user_config.proton_user}",
+        "PROTON_BRIDGE_PASSWORD": "${user_config.proton_password}",
+        "PROTON_IMAP_HOST": "${user_config.imap_host}",
+        "PROTON_IMAP_PORT": "${user_config.imap_port}",
+        "PROTON_SMTP_HOST": "${user_config.smtp_host}",
+        "PROTON_SMTP_PORT": "${user_config.smtp_port}",
+        "PROTON_MODE": "${user_config.mode}",
+        "PROTON_ATTACH_DIR": "${user_config.attach_dir}"
+      }
+    }
+  },
+  "tools": [
+    {
+      "name": "list_folders",
+      "description": "List all Proton folders and labels available over the Bridge. Call this first to learn exact folder/label names for filing and tagging."
+    },
+    {
+      "name": "folder_status",
+      "description": "Message counts plus UIDNEXT and UIDVALIDITY for a folder. UIDs are only valid within one UIDVALIDITY generation, so check this before acting on uids noted earlier."
+    },
+    {
+      "name": "poll_folder",
+      "description": "Messages that have arrived since the last poll. The very first poll emits nothing and just records where the mailbox ends, so turning this on does not replay the backlog. Marks nothing as read."
+    },
+    {
+      "name": "ack_folder",
+      "description": "Commit a checkpoint returned by poll_folder with advance=false. Repeating it is harmless."
+    },
+    {
+      "name": "search_mail",
+      "description": "Search a folder. Combine any of: text, from, subject, since (DD-Mon-YYYY), unread_only, flagged_only. Returns uids + envelopes, newest first."
+    },
+    {
+      "name": "search_all_mail",
+      "description": "Search every mailbox at once and collapse duplicates by Message-ID, reporting where each message lives. Use when you do not know which folder something is in."
+    },
+    {
+      "name": "get_headers",
+      "description": "Headers plus SPF/DKIM/DMARC verdicts and Proton metadata, for judging whether a message is what it claims to be. Pass raw=true for the unparsed header block."
+    },
+    {
+      "name": "read_message",
+      "description": "Read the full headers and body text of one message by uid within a folder."
+    },
+    {
+      "name": "list_attachments",
+      "description": "List a message's attachments, separating real DOCUMENTS from inline cid: images and PGP keys (hidden by default). Call before claiming a message has no attachment — read_message shows body text only and never reveals files."
+    },
+    {
+      "name": "read_attachment",
+      "description": "Extract an attachment's TEXT inline — PDFs via pypdf, plus text/csv/json/ics/eml. Use for invoices, decks, reports. Binary/image types must use save_attachment instead."
+    },
+    {
+      "name": "view_attachment",
+      "description": "Look at an image attachment. Returns it as a viewable image, which is the only way to see a photo or a scan when the client cannot read local files. Images only, use read_attachment for text and PDFs."
+    },
+    {
+      "name": "save_attachment",
+      "description": "Write attachment(s) to disk and return the path(s). Use for images, scanned PDFs, or anything not text-extractable. EPHEMERAL by default — files self-delete after the TTL."
+    },
+    {
+      "name": "purge_attachments",
+      "description": "Immediately delete all ephemeral saved attachments. Call after reading a saved file so nothing lingers on disk."
+    },
+    {
+      "name": "find_thread",
+      "description": "Pull every message of a conversation from All Mail, showing which ones carry documents. ESSENTIAL: Proton's UI groups conversations but IMAP exposes single messages, so an inbox 'Re:' can look attachment-free while the thread's original holds the PDFs. Run this before concluding what a thread needs."
+    },
+    {
+      "name": "bulk_mark",
+      "description": "Mark many messages read/unread/starred in one pass. Far cheaper than one call per message."
+    },
+    {
+      "name": "bulk_apply_label",
+      "description": "Apply one existing label to many messages. Messages stay where they are."
+    },
+    {
+      "name": "bulk_move",
+      "description": "File or Trash many messages at once. GATED: preview with dry_run=true, show the user, then call with confirmed=true."
+    },
+    {
+      "name": "reply",
+      "description": "Reply to one message with correct threading. Replies to the Reply-To address when there is one, so alias mail stays masked. Pass draft=true to save it for review, or confirmed=true to send."
+    },
+    {
+      "name": "reply_all",
+      "description": "Reply to everyone on a message, with your own addresses removed from Cc and duplicates dropped. Same draft and confirmation rules as reply."
+    },
+    {
+      "name": "create_draft",
+      "description": "Write a draft into the Proton Drafts folder. Never sends. For a reply, pass in_reply_to (the original Message-ID)."
+    },
+    {
+      "name": "update_draft",
+      "description": "Replace a draft's contents. Threading headers are carried over, the new version is saved before the old one is binned. Omit a field to keep what the draft already had."
+    },
+    {
+      "name": "delete_draft",
+      "description": "Move a draft to Trash. GATED. Nothing here deletes permanently."
+    },
+    {
+      "name": "send_draft",
+      "description": "Send a saved draft as written, then move it to Trash. GATED. Sender and recipient checks run again at send time."
+    },
+    {
+      "name": "unsubscribe",
+      "description": "Report how to unsubscribe from a message using its List-Unsubscribe header, and optionally send the email form. Reports only unless send=true. Web links are never fetched for you."
+    },
+    {
+      "name": "mark",
+      "description": "Mark a message read/unread or star/unstar."
+    },
+    {
+      "name": "apply_label",
+      "description": "Tag a message with an existing label. The message stays where it is."
+    },
+    {
+      "name": "remove_label",
+      "description": "Take a label off a message. The message itself stays where it is. GATED: removing a label ends in an expunge against the label mailbox, so confirm it or preview with dry_run=true first."
+    },
+    {
+      "name": "bulk_remove_label",
+      "description": "Take one label off many messages at once. The messages stay where they are. GATED, like remove_label."
+    },
+    {
+      "name": "move_to_folder",
+      "description": "File a message: move it into another folder (e.g. 'Folders/<name>', 'Archive', 'Trash')."
+    },
+    {
+      "name": "create_folder_or_label",
+      "description": "Create a new label or folder. GATED: it changes your folder and label structure, so confirm the exact name and type with the user, then call with confirmed=true."
+    },
+    {
+      "name": "delete_label",
+      "description": "Delete a label outright. Every message that carried it stays exactly where it is and simply loses the tag — no mail is deleted. Labels only; folders are where messages live and are not deletable here. GATED."
+    },
+    {
+      "name": "bulk_delete_labels",
+      "description": "Delete several labels in one pass. Messages keep their place and lose the tags. Labels only, GATED."
+    },
+    {
+      "name": "send",
+      "description": "Send a new email. GATED: the agent must show the user the exact To/Subject/Body, get an explicit yes, then call with confirmed=true. Never call unattended."
+    },
+    {
+      "name": "forward",
+      "description": "Forward an existing message to someone on demand. GATED like send: confirm recipient with the user, then call with confirmed=true."
+    }
+  ],
+  "tools_generated": false,
+  "user_config": {
+    "proton_user": {
+      "type": "string",
+      "title": "Bridge username",
+      "description": "The username from Bridge's Mailbox details, usually your Proton address.",
+      "required": true
+    },
+    "proton_password": {
+      "type": "string",
+      "title": "Bridge password",
+      "description": "The password from Bridge's Mailbox details, not your Proton account password. Leave blank if you have already stored it with setup.py, and your system credential store will be used instead.",
+      "sensitive": true,
+      "required": false
+    },
+    "imap_host": {
+      "type": "string",
+      "title": "IMAP host",
+      "description": "Where Bridge is listening. It runs on this machine, so leave it on loopback.",
+      "default": "127.0.0.1",
+      "required": false
+    },
+    "imap_port": {
+      "type": "number",
+      "title": "IMAP port",
+      "description": "Bridge picks its own port. Read it from Mailbox details rather than assuming 1143.",
+      "default": 1143,
+      "required": false
+    },
+    "smtp_host": {
+      "type": "string",
+      "title": "SMTP host",
+      "description": "Where Bridge is listening for outgoing mail. Also loopback.",
+      "default": "127.0.0.1",
+      "required": false
+    },
+    "smtp_port": {
+      "type": "number",
+      "title": "SMTP port",
+      "description": "Again, read it from Bridge rather than assuming 1025.",
+      "default": 1025,
+      "required": false
+    },
+    "mode": {
+      "type": "string",
+      "title": "Permission mode",
+      "description": "full gives every tool. organise gives everything except putting mail on the wire. readonly removes anything that changes the mailbox. Anything unrecognised is treated as full.",
+      "default": "full",
+      "required": false
+    },
+    "attach_dir": {
+      "type": "directory",
+      "title": "Attachments folder",
+      "description": "Where saved attachments go, and the only place files may be attached from. Widening this is how data walks off a computer, so leave it alone unless you mean it.",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "python": ">=3.9"
+    }
+  }
+}
