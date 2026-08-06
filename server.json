@@ -1,6 +1,6 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.considus/proton-bridge-mcp",
+  "name": "com.considus/proton-bridge-mcp",
   "title": "Proton Bridge MCP",
   "description": "Read, organise and carefully-gated send access to your Proton Mail over Proton Mail Bridge, without your mail leaving this machine.",
   "version": "1.1.0",
