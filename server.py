@@ -302,7 +302,8 @@ _ORGANISE_ONLY = {"send", "forward", "reply", "reply_all", "send_draft"}
 
 
 def _mode():
-    """readonly cannot change anything. organise can file, label and draft but
+    """readonly cannot change your mail or your files, and still moves this
+    server's own polling checkpoint. organise can file, label and draft but
     never sends. full is everything. A tool that is not registered cannot be
     talked into running, so this removes them rather than guarding them."""
     if _cfg("PROTON_READONLY", "").lower() in ("1", "true", "yes", "on"):
@@ -3439,8 +3440,19 @@ _MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
              "bulk_remove_label", "bulk_move", "reply", "reply_all",
              "update_draft", "delete_draft", "send_draft", "unsubscribe",
              "delete_label", "bulk_delete_labels"}
+# _MUTATING is a statement about mail, and readonly has to take away more than
+# that. purge_attachments deletes files off the disk without ever touching the
+# mailbox, so it falls outside _MUTATING while plainly changing something, and
+# a mode called readonly cannot be the one that offers it.
+#
+# The polling pair stay. poll_folder and ack_folder write this server's own
+# checkpoint and nothing of yours, so removing them would cost the one workflow
+# readonly is for, watching a mailbox, to protect a file that is ours anyway.
+# That distinction is the whole reason this set is separate from _MUTATING.
+_READONLY_ALSO_REMOVES = {"purge_attachments"}
 if MODE == "readonly":
-    TOOLS = [t for t in TOOLS if t["name"] not in _MUTATING]
+    TOOLS = [t for t in TOOLS
+             if t["name"] not in _MUTATING | _READONLY_ALSO_REMOVES]
 elif MODE == "organise":
     # Everything except putting mail on the wire.
     TOOLS = [t for t in TOOLS if t["name"] not in _ORGANISE_ONLY]
