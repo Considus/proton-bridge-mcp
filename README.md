@@ -8,7 +8,7 @@ Unofficial, and not affiliated with or endorsed by Proton AG.
 
 ## What it can do
 
-Search and read mail, pull attachments out and read them (including the text of PDF invoices), tag and file messages one at a time or in batches, reply in thread, and send or forward with a confirmation step you can't talk it out of.
+Search and read mail, pull attachments out and read them (including the text of PDF invoices), tag and file messages one at a time or in batches, reply in thread, and send or forward behind a confirmation step.
 
 Anything that sends takes `draft=true` instead, which puts it in your Drafts for you to look at. That path needs no confirmation, because nothing goes anywhere.
 
@@ -245,9 +245,15 @@ If a message came in through a SimpleLogin alias, `reply` answers the reverse-al
 
 `from_address` is checked against an allowlist that starts as your own address and your alias-owner address, nothing else. An injected instruction can't make mail appear to come from someone else, and widening it means editing `PROTON_ALLOWED_SENDERS` yourself.
 
-### Sending always stops
+### Sending always stops, and so does anything else you can't take back
 
-`send`, `forward` and `create_folder_or_label` refuse unless the assistant passes `confirmed=true`, which it should only do after showing you the exact recipient, subject and body. That one is a speed bump rather than a wall, an assistant that had been fully talked round could set it, which is exactly why the address rule above exists as well.
+Thirteen tools refuse to do the real thing unless the assistant passes `confirmed=true`, which it should only do after showing you what is about to happen.
+
+Everything that puts mail on the wire, `send`, `forward`, `reply`, `reply_all`, `send_draft` and `unsubscribe`. Everything that destroys something, `delete_draft`, `delete_label` and `bulk_delete_labels`. And the changes that are tedious rather than impossible to undo, `create_folder_or_label`, `bulk_move`, `remove_label` and `bulk_remove_label`.
+
+A preview is exempt, because a preview is harmless. `dry_run=true` needs no confirmation anywhere, and replying with `draft=true` needs none either, since a draft sits in your Drafts and goes nowhere.
+
+The gate is a speed bump rather than a wall. An assistant that had been fully talked round could set the flag itself, which is exactly why the address rule above exists as well.
 
 ## What's recorded, and what you can preview
 

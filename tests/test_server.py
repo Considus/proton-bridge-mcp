@@ -1390,18 +1390,22 @@ class Annotations(unittest.TestCase):
             self.assertTrue(t.get("title"), t["name"])
             self.assertIn("annotations", t)
 
-    def test_readonly_mode_is_about_the_mailbox_not_the_disk(self):
-        # readonly is defined by _MUTATING, which is a statement about mail.
-        # Three tools it keeps still write something: the polling pair move the
-        # local checkpoint, and purge_attachments deletes saved files. Pinned
-        # rather than quietly widened, because narrowing what a mode offers is
-        # a decision about the product. If _MUTATING changes, update this.
+    def test_readonly_never_offers_a_tool_that_deletes(self):
+        # readonly was once defined by _MUTATING alone, which is a statement
+        # about mail, so it kept purge_attachments: a tool that deletes files
+        # off the disk without ever touching the mailbox. A mode called
+        # readonly cannot be the one that offers that, so it is removed too.
+        #
+        # The polling pair stay, and are the only tools left here that write
+        # anything, because what they write is this server's own checkpoint
+        # rather than anything of the user's. If that reasoning changes, this
+        # test is the thing to argue with first.
         msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
                    env={"PROTON_READONLY": "1"})
         tools = [t for m in msgs if m.get("id") == 2 for t in m["result"]["tools"]]
+        self.assertNotIn("purge_attachments", {t["name"] for t in tools})
         writing = {t["name"] for t in tools if not t["annotations"]["readOnlyHint"]}
-        self.assertEqual(writing,
-                         {"poll_folder", "ack_folder", "purge_attachments"})
+        self.assertEqual(writing, {"poll_folder", "ack_folder"})
 
 
 class Manifest(unittest.TestCase):
