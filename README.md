@@ -20,7 +20,7 @@ Files can be attached to anything you send, though only from directories you've 
 | `folder_status` | Counts, plus the UIDVALIDITY every uid in that folder depends on |
 | `poll_folder` | What has arrived since you last looked |
 | `ack_folder` | Confirms a batch was handled |
-| `search_mail` | Search by text, sender, subject, date range, unread, starred |
+| `search_mail` | Search by text, sender, subject, date range, unread, starred; optionally report each message's other labels and folders |
 | `search_all_mail` | The same search across every folder and label, duplicates collapsed |
 | `get_headers` | Headers with SPF, DKIM and DMARC verdicts, and Proton metadata |
 | `read_message` | Full headers and body |

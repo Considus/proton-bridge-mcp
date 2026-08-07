@@ -115,7 +115,7 @@ ATTACH_DIR = _cfg("PROTON_ATTACH_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "attachments")
 
 SERVER_NAME = "proton-mail"
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
 DEFAULT_PROTOCOL = "2025-06-18"
 
 
@@ -659,6 +659,41 @@ def _build_search(args):
     return crit
 
 
+def _message_locations(conn, mids, exclude=None):
+    """Every mailbox holding each of these Message-IDs.
+
+    One server-side SEARCH per mailbox with no envelope fetches, rather than
+    sweeping every mailbox and collapsing duplicates afterwards — the caller
+    already knows which messages it cares about. IMAP HEADER search matches a
+    substring of the field rather than the whole of it (RFC 3501), so a short
+    Message-ID can match inside a longer one; every hit is confirmed by
+    fetching its own Message-ID and comparing exactly. This reselects
+    mailboxes, so callers must finish with the current one before calling."""
+    wanted = [m for m in dict.fromkeys(mids) if m]
+    found = {m: [] for m in wanted}
+    if not wanted:
+        return found
+    for name in [n for f, n in _list_mailboxes(conn) if "noselect" not in f]:
+        if name == exclude:
+            continue
+        if conn.select(_folder_quote(name), readonly=True)[0] != "OK":
+            continue
+        for mid in wanted:
+            typ, data = conn.uid("SEARCH", None, "HEADER", "MESSAGE-ID",
+                                 _imap_quote(mid, "message-id"))
+            if typ != "OK" or not data or not data[0]:
+                continue
+            for u in data[0].split():
+                typ, md = conn.uid("FETCH", u,
+                                   "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+                if typ != "OK" or not md or md[0] is None:
+                    continue
+                if _parse_envelope(md[0][1])["message_id"] == mid:
+                    found[mid].append(name)
+                    break
+    return found
+
+
 # ----------------------------------------------------------------------------
 # Tool handlers
 # ----------------------------------------------------------------------------
@@ -698,7 +733,8 @@ def tool_search_mail(args):
         for uid in uids:
             typ, md = conn.uid("FETCH", uid,
                                "(FLAGS BODY.PEEK[HEADER.FIELDS "
-                               "(FROM SUBJECT DATE X-SIMPLELOGIN-TYPE)])")
+                               "(FROM SUBJECT DATE MESSAGE-ID "
+                               "X-SIMPLELOGIN-TYPE)])")
             if typ != "OK" or not md or md[0] is None:
                 continue
             header_bytes = md[0][1]
@@ -714,14 +750,24 @@ def tool_search_mail(args):
             _sl = hmsg.get("X-SimpleLogin-Type") or hmsg.get("X-Simplelogin-Type") or ""
             if "forward" in _sl.lower():
                 flags += "↩"  # aliased: repliable via reverse-alias in Reply-To
-            rows.append("[uid %s] %s\n    from: %s\n    date: %s  %s" % (
+            rows.append(["[uid %s] %s\n    from: %s\n    date: %s  %s" % (
                 uid.decode(), env["subject"] or "(no subject)",
-                env["from"], env["date"], flags))
+                env["from"], env["date"], flags), env["message_id"]])
         if not rows:
             return "No messages matched in '%s'." % folder
+        if args.get("include_locations"):
+            # After the fetch loop, never during it: this reselects mailboxes.
+            locs = _message_locations(conn, [m for _, m in rows], exclude=folder)
+            for row in rows:
+                if not row[1]:
+                    row[0] += "\n    also in: unknown (no Message-ID)"
+                else:
+                    row[0] += "\n    also in: %s" % (
+                        ", ".join(locs[row[1]]) or "nowhere else")
         return ("%d message(s) in '%s' (uidvalidity %s \u2014 pass this back with "
                 "any uid to guard against a resync):\n\n%s"
-                % (len(rows), folder, validity or "unknown", "\n\n".join(rows)))
+                % (len(rows), folder, validity or "unknown",
+                   "\n\n".join(r[0] for r in rows)))
     finally:
         try:
             conn.logout()
@@ -789,7 +835,9 @@ def tool_search_all_mail(args):
     rows = []
     for r in hits[:limit]:
         env = r["env"]
-        extra = ("\n    also in: %s" % ", ".join(sorted(set(r["also"]))[:6])) if r["also"] else ""
+        # Never truncate this: a caller deciding by label reads a missing
+        # mailbox as "not labelled".
+        extra = ("\n    also in: %s" % ", ".join(sorted(set(r["also"])))) if r["also"] else ""
         rows.append("[%s uid %s, uidvalidity %s] %s\n    from: %s\n    date: %s%s"
                     % (r["folder"], r["uid"], r["validity"] or "unknown",
                        env["subject"] or "(no subject)", env["from"], env["date"], extra))
@@ -2827,7 +2875,8 @@ TOOLS = [
         "name": "search_mail",
         "description": "Search a folder. Combine any of: text, from, subject, "
                        "since (DD-Mon-YYYY), unread_only, flagged_only. Returns "
-                       "uids + envelopes, newest first.",
+                       "uids + envelopes, newest first. Set include_locations to "
+                       "also report which labels and folders each message carries.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2840,6 +2889,7 @@ TOOLS = [
                 "unread_only": {"type": "boolean"},
                 "flagged_only": {"type": "boolean"},
                 "limit": {"type": "integer", "description": "Max results (default 15)."},
+                "include_locations": {"type": "boolean", "description": "Report every other mailbox each message appears in, so you can tell what it is already labelled or filed as without a second search. Costs one search per mailbox."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
             },
         },

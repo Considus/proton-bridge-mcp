@@ -3,7 +3,7 @@
   "manifest_version": "0.3",
   "name": "proton-bridge-mcp",
   "display_name": "Proton Bridge MCP",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Read, organise and carefully-gated send access to your Proton Mail, without your mail leaving this machine.",
   "long_description": "Proton is end-to-end encrypted, which is why there is no API to plug an assistant into. Proton Mail Bridge decrypts locally and speaks ordinary IMAP and SMTP to 127.0.0.1, so this server reads and files your mail without sending it anywhere. Search and read, pull text out of PDF attachments, tag and file in bulk, reply in thread, and send or forward behind a confirmation step. Requires Proton Mail Bridge, which is a paid Proton feature.\n\nUnofficial, and not affiliated with or endorsed by Proton AG.",
   "author": {
@@ -71,7 +71,7 @@
     },
     {
       "name": "search_mail",
-      "description": "Search a folder. Combine any of: text, from, subject, since (DD-Mon-YYYY), unread_only, flagged_only. Returns uids + envelopes, newest first."
+      "description": "Search a folder. Combine any of: text, from, subject, since (DD-Mon-YYYY), unread_only, flagged_only. Returns uids + envelopes, newest first. Set include_locations to also report which labels and folders each message carries."
     },
     {
       "name": "search_all_mail",
