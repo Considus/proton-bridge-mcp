@@ -81,6 +81,18 @@ IMAP identifies a message by a number that's only meaningful until the folder re
 
 Worth knowing before you trust an answer about attachments. Proton's app groups mail into conversations and shows a paperclip if anything in the thread has one. IMAP hands over individual messages with no grouping at all. A reply sitting in your inbox can be completely empty while the original, filed somewhere else, is carrying the PDFs. That's why `find_thread` exists, and why "no attachments" from a single message is an answer worth checking.
 
+## Things to actually ask it
+
+Four that exercise different parts of it, and none of them need you to know a tool name.
+
+**"Find the invoices from my accountant this quarter and total them up."** Searches, then opens the attachments and reads the text out of the PDFs. This is the one that justifies bundling a PDF library rather than telling you an invoice exists and leaving you to open it.
+
+**"What's arrived since I last checked, and what actually needs me?"** Uses the checkpointed batch, so if it falls over halfway you get the same batch again rather than losing it. Poll with `advance=false` and nothing moves until you say so.
+
+**"File everything from Companies House into Admin, but show me the list first."** A search, then a bulk move. The preview runs every check the real thing would, and the move needs confirming on top of it, because moving 50 messages somewhere you didn't intend is an afternoon.
+
+**"Draft a reply to Sam saying I'll confirm Monday. Don't send it."** Goes to your Drafts and stops. That path needs no confirmation at all, because nothing has gone anywhere.
+
 ## Other mail providers
 
 Bridge is what this was built for, and it's the case with no alternative, since Proton has no API to point anything else at. The rest of it is ordinary IMAP and SMTP though, so it works against a normal mailbox too, which is useful if your business mail comes from a smaller host rather than Google or Microsoft.
@@ -334,6 +346,8 @@ Write to privacy@considus.com, or open an issue at [github.com/Considus/proton-b
 ## Support
 
 This is free and stays that way. Apache 2.0 means you can take it, build on it, and ship it commercially without owing anything back, which is deliberate.
+
+Something broken or behaving oddly, [open an issue](https://github.com/Considus/proton-bridge-mcp/issues). Anything exploitable goes through GitHub's private reporting instead, described in [SECURITY.md](SECURITY.md), not a public issue. For anything that doesn't fit either, including press and licensing, it's <support@considus.com>, and the rest of the ways to reach us are at [considus.com/support](https://considus.com/support/).
 
 If it saved you an afternoon, there's [buymeacoffee.com/considus](https://buymeacoffee.com/considus). If it didn't, opening an issue when something breaks is worth more than the coffee.
 
