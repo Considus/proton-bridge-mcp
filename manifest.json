@@ -3,12 +3,12 @@
   "manifest_version": "0.3",
   "name": "proton-bridge-mcp",
   "display_name": "Proton Bridge MCP",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Read, organise and carefully-gated send for Proton Mail, without your mail leaving this machine.",
   "long_description": "Proton is end-to-end encrypted, which is why there is no API to plug an assistant into. Proton Mail Bridge decrypts locally and speaks ordinary IMAP and SMTP to 127.0.0.1, so this server reads and files your mail without sending it anywhere. Search and read, pull text out of PDF attachments, tag and file in bulk, reply in thread, and send or forward behind a confirmation step. Requires Proton Mail Bridge, which is a paid Proton feature.\n\nUnofficial, and not affiliated with or endorsed by Proton AG.",
   "author": {
     "name": "Considus",
-    "url": "https://considus.com"
+    "url": "https://github.com/Considus"
   },
   "homepage": "https://considus.com/proton-bridge-mcp/",
   "documentation": "https://considus.com/proton-bridge-mcp/install/",
@@ -49,6 +49,11 @@
         "PROTON_SMTP_PORT": "${user_config.smtp_port}",
         "PROTON_MODE": "${user_config.mode}",
         "PROTON_ATTACH_DIR": "${user_config.attach_dir}"
+      },
+      "platform_overrides": {
+        "win32": {
+          "command": "python"
+        }
       }
     }
   },

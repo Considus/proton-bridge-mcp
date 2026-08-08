@@ -96,10 +96,55 @@ def _vendor(libdir):
     os.makedirs(libdir, exist_ok=True)
     subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
                     "--target", libdir] + VENDOR, check=True)
-    # pip leaves metadata that only inflates the bundle.
-    for entry in os.listdir(libdir):
-        if entry.endswith((".dist-info", ".egg-info")) or entry == "__pycache__":
-            shutil.rmtree(os.path.join(libdir, entry), ignore_errors=True)
+    # pip leaves metadata that only inflates the bundle, so most of it goes.
+    # The licences do not. pypdf is BSD-3-Clause, which requires its copyright
+    # notice travel with any redistribution, and this bundle is a
+    # redistribution. Deleting .dist-info wholesale took the notice with it,
+    # so the licence files are lifted out first and kept beside the package.
+    for entry in sorted(os.listdir(libdir)):
+        path = os.path.join(libdir, entry)
+        if entry.endswith((".dist-info", ".egg-info")):
+            _keep_licences(path, libdir, entry.split("-")[0])
+            shutil.rmtree(path, ignore_errors=True)
+        elif entry == "__pycache__":
+            shutil.rmtree(path, ignore_errors=True)
+
+    kept = sorted(f for f in os.listdir(libdir) if f.endswith(".LICENSE"))
+    if len(kept) < len(VENDOR):
+        raise SystemExit(
+            "Refusing to build: found %d licence file(s) for %d vendored "
+            "package(s) in %s. Shipping a dependency without its licence is a "
+            "redistribution problem, not a tidiness one." %
+            (len(kept), len(VENDOR), libdir))
+    print("  vendored licences  " + ", ".join(kept))
+
+
+# Where the packaging tools of the last few years have put licence text inside
+# .dist-info. Newer pip uses the licenses/ subdirectory, older versions put the
+# file at the top level, and the name varies by project.
+_LICENCE_NAMES = ("LICENSE", "LICENCE", "COPYING", "NOTICE", "AUTHORS")
+
+
+def _keep_licences(distinfo, libdir, pkg):
+    """Copy a package's licence files out of .dist-info before it is deleted."""
+    found = []
+    for root, _dirs, files in os.walk(distinfo):
+        for name in sorted(files):
+            stem = os.path.splitext(name)[0].upper()
+            if stem.startswith(_LICENCE_NAMES):
+                found.append(os.path.join(root, name))
+    if not found:
+        return
+    # One file per package, concatenated when a project ships several, so the
+    # bundle carries a single obvious <package>.LICENSE.
+    out = os.path.join(libdir, "%s.LICENSE" % pkg)
+    with open(out, "w", encoding="utf-8") as dest:
+        for i, src in enumerate(found):
+            if i:
+                dest.write("\n\n" + "-" * 70 + "\n\n")
+            dest.write("%s\n\n" % os.path.basename(src))
+            with open(src, encoding="utf-8", errors="replace") as f:
+                dest.write(f.read())
 
 
 def build():
