@@ -32,7 +32,44 @@ CI runs the same tests on Python 3.9 and 3.12, plus a compile check. A pull requ
 
 Every tool needs a title and the right `readOnlyHint` or `destructiveHint`, and a directory submission is rejected without them. The classification sits next to `TOOLS` in `server.py` rather than being derived from `_MUTATING`, because that set is about which tools change the *mailbox*, and three tools that change something else fall the wrong side of it. Tests cover this.
 
-Releasing, and the order matters. Build once, upload the artifact that build produced, then publish `server.json` from the same run. The archive carries timestamps, so the build is not reproducible and a second build of identical sources hashes differently. Rebuild after stamping and `server.json` points at a hash no published file has, which a client reads as a corrupted download rather than a mistake in the listing.
+## Releasing
+
+The order matters, because the archive carries timestamps. The build is not reproducible, a second build of identical sources hashes differently, and a rebuild after stamping leaves `server.json` pointing at a hash no published file has. A client reads that as a corrupted download rather than as a mistake in the listing.
+
+**Nothing here happens on its own.** The MCP Registry does not watch this repo, its tags or its releases. Cut a release without step 7 and the registry carries on describing the previous bundle, silently and for as long as you leave it.
+
+1. **Bump the version in `server.py`**, not in `manifest.json`, which is generated from it. Then `./build-mcpb.py --sync`.
+2. **Check the listing before going further.** The registry rejects a `description` over 100 characters, and it does so at publish time, long after a release has been cut. `mcp-publisher validate` catches it and publishes nothing.
+3. **Open a PR and merge it.** Everything below assumes `main` is final.
+4. **Tag `main` once the listing is settled, not before.** A tag cut earlier points at a commit whose `manifest.json` disagrees with the copy inside the bundle you are about to ship.
+5. **Build once.** `./build-mcpb.py` packs `dist/proton-bridge-mcp-<version>.mcpb` and stamps its SHA-256 into `server.json`. Do not build again after this.
+6. **Cut the release with that exact file.**
+
+   ```bash
+   gh release create v<version> dist/proton-bridge-mcp-<version>.mcpb -R Considus/proton-bridge-mcp
+   ```
+
+7. **Publish, logging in immediately first.** The registry JWT expires quickly enough that a login from earlier in the same sitting will fail.
+
+   ```bash
+   SEED=$(openssl pkey -in <key.pem> -outform DER | tail -c 32 | xxd -p -c 64)
+   mcp-publisher login dns --domain considus.com --private-key "$SEED"
+   mcp-publisher publish
+   ```
+
+   The signing key is the only proof of the `com.considus` namespace. Its public half is the `v=MCPv1` TXT record on considus.com, so the key can be checked against DNS rather than taken on trust.
+
+8. **Verify what was published, not what you built.** Download the release asset, hash it, and compare against `fileSha256` in `server.json`.
+9. **Deprecate the version this replaces.**
+
+   ```bash
+   mcp-publisher status --status deprecated --message "Superseded by <version>." \
+     com.considus/proton-bridge-mcp <old-version>
+   ```
+
+   Read the status back from `/v0/servers/com.considus%2Fproton-bridge-mcp/versions`. The `?search=` listing reports every version as active regardless, and will tell you the change failed when it did not.
+
+10. **Rebuild the website if this README changed.** considus.com's product pages are generated from it, by `build-product-pages.py` in `Considus-Ops`.
 
 ## Proposing a change
 
