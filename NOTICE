@@ -10,3 +10,14 @@ Proton AG, referred to here only to describe what this software works with.
 The typefaces in assets/fonts are licensed separately under the SIL Open Font
 License 1.1, whose terms and required copyright notices are in
 assets/fonts/OFL.txt. That file must travel with the font files.
+
+The .mcpb bundle redistributes two third-party packages, each licensed
+separately and neither covered by this project's own licence. Their copyright
+notices and licence terms travel with them inside the bundle.
+
+  pypdf              BSD 3-Clause License     lib/pypdf.LICENSE
+  typing_extensions  Python Software          lib/typing_extensions.LICENSE
+                     Foundation License 2.0
+
+typing_extensions is not a direct dependency. It arrives with pypdf and is
+carried because pypdf needs it at runtime.
