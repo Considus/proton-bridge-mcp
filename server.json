@@ -3,7 +3,7 @@
   "name": "com.considus/proton-bridge-mcp",
   "title": "Proton Bridge MCP",
   "description": "Read, organise and carefully-gated send for Proton Mail, without your mail leaving this machine.",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "websiteUrl": "https://considus.com/proton-bridge-mcp/",
   "repository": {
     "url": "https://github.com/Considus/proton-bridge-mcp",
@@ -12,8 +12,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/Considus/proton-bridge-mcp/releases/download/v1.2.1/proton-bridge-mcp-1.2.1.mcpb",
-      "fileSha256": "3b6d0edd3f198cf1fe7600c328b86dbc128d4d73516069e5922b9ddd44094ce6",
+      "identifier": "https://github.com/Considus/proton-bridge-mcp/releases/download/v1.2.2/proton-bridge-mcp-1.2.2.mcpb",
+      "fileSha256": "e1236f0b76adc72730d506bc809341256d216b0b118de0d5e125fdec1c5457a4",
       "transport": {
         "type": "stdio"
       }
