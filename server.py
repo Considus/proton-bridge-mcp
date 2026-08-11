@@ -115,7 +115,7 @@ ATTACH_DIR = _cfg("PROTON_ATTACH_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "attachments")
 
 SERVER_NAME = "proton-mail"
-SERVER_VERSION = "1.2.1"
+SERVER_VERSION = "1.2.2"
 DEFAULT_PROTOCOL = "2025-06-18"
 
 
