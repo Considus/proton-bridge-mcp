@@ -172,6 +172,20 @@ It works this way round on purpose. Every client keeps its MCP config somewhere 
 
 Restart the app afterwards, MCP servers load at startup.
 
+## When something goes wrong
+
+**The connection is refused.** Bridge isn't running, or it isn't on the ports this is looking at. Bridge picks its own port numbers per install and they aren't always 1143 and 1025, so open it, read the real ones out of Mailbox details, and set `PROTON_IMAP_PORT` and `PROTON_SMTP_PORT` to match.
+
+**The login is rejected.** This is the common one by a distance. Bridge has a password of its own, shown in Bridge under Mailbox details, and it isn't your Proton account password. The account password is refused every time, and what you get back looks like a broken install rather than the wrong credential.
+
+**It says setup is required.** Run `python3 setup.py` and let it walk you through. Doing it by hand instead, set `PROTON_USER` to the address Bridge shows you, then supply the Bridge password either through the `PROTON_BRIDGE_PASSWORD` environment variable or through your computer's credential store.
+
+**A uid that worked ten minutes ago is refused.** The folder resynced underneath you and those numbers now point at different mail, so the refusal is the tool doing its job rather than failing at it, described in [UIDs go stale](#uids-go-stale). Search again and act on the uid the search hands back, not the one you were holding.
+
+**An attachment you can see in Proton isn't there.** Proton's app groups mail into conversations, IMAP hands over individual messages, and the reply sitting in your inbox can be completely empty while the original, filed somewhere else, carries the PDFs. `find_thread` is the way round it, and [Conversations aren't messages](#conversations-arent-messages) is why.
+
+**It stopped and asked you before sending.** Working as designed, not a fault. Nothing leaves the machine without you saying so, which is [Nothing goes out quietly](#nothing-goes-out-quietly).
+
 ## Updating
 
 There's no package and no installer, so there's nothing to download. The server runs as `server.py` out of the directory you cloned into, which makes an update a pull and a restart.
