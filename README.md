@@ -8,6 +8,8 @@ Unofficial, and not affiliated with or endorsed by Proton AG.
 
 [Docs](https://considus.com/proton-bridge-mcp/) · [Install](https://considus.com/proton-bridge-mcp/install/) · [Security](https://considus.com/proton-bridge-mcp/security/) · [FAQ](https://considus.com/proton-bridge-mcp/faq/)
 
+[![proton-bridge-mcp MCP server](https://glama.ai/mcp/servers/Considus/proton-bridge-mcp/badges/score.svg)](https://glama.ai/mcp/servers/Considus/proton-bridge-mcp)
+
 ## What it can do
 
 Search and read mail, pull attachments out and read them (including the text of PDF invoices), tag and file messages one at a time or in batches, reply in thread, and send or forward behind a confirmation step.
