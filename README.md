@@ -8,7 +8,7 @@ Unofficial, and not affiliated with or endorsed by Proton AG.
 
 [Docs](https://considus.com/proton-bridge-mcp/) · [Install](https://considus.com/proton-bridge-mcp/install/) · [Security](https://considus.com/proton-bridge-mcp/security/) · [FAQ](https://considus.com/proton-bridge-mcp/faq/)
 
-[![proton-bridge-mcp MCP server](https://glama.ai/mcp/servers/Considus/proton-bridge-mcp/badges/score.svg)](https://glama.ai/mcp/servers/Considus/proton-bridge-mcp)
+[![proton-bridge-mcp MCP server](https://glama.ai/mcp/servers/ConsidusOld/proton-bridge-mcp/badges/card.svg)](https://glama.ai/mcp/servers/ConsidusOld/proton-bridge-mcp)
 
 ## What it can do
 
