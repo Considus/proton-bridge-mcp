@@ -316,7 +316,7 @@ CSS = """
 :root{
   --ink:#0F0E0C; --dusk:#1C1A16; --starlight:#ECF1F5; --haze:#9AADB8;
   --slate:#4C5E6B; --cirrus:#EEF3F7; --drift:#D0DAE2;
-  --stellar:#A0DCEE; --orbit:#1A9ABE; --anchor:#15788F;
+  --stellar:#A0DCEE; --orbit:#1A9ABE; --anchor:#167890;
   --bg:var(--cirrus); --surface:#ffffff; --edge:rgba(0,0,0,0.08);
   --text:var(--ink); --muted:var(--slate); --accent:var(--orbit); --cta:var(--anchor);
   --serif:'Cormorant Garamond',Georgia,'Times New Roman',serif;
