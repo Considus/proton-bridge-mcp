@@ -1,12 +1,12 @@
 # Contributing
 
-Thanks for taking a look. This is a small, deliberately boring codebase, and that's a feature — it handles someone's email, so surprises aren't welcome.
+Thanks for taking a look. This is a small, deliberately boring codebase, and that's a feature, it handles someone's email, so surprises aren't welcome.
 
 ## Ground rules
 
-A few things the project holds to, so a change is worth proposing if it fits them:
+A change is worth proposing if it fits what the project holds to.
 
-- **The server is standard-library only.** `server.py` imports nothing outside Python's stdlib. `pypdf` and `keyring` are optional, imported lazily inside a `try`, and the code works without them. Please keep it that way — a mail tool people run locally shouldn't drag in a dependency tree.
+- **The server is standard-library only.** `server.py` imports nothing outside Python's stdlib. `pypdf` and `keyring` are optional, imported lazily inside a `try`, and the code works without them. Please keep it that way, a mail tool people run locally shouldn't drag in a dependency tree.
 - **Assume the mail is hostile.** Anything read out of a message or attachment is untrusted input. If your change reads message content, think about what happens when that content is trying to make the assistant do something.
 - **Small diffs.** The smallest change that fixes the thing, rather than a rewrite alongside it. If you spot something else, say so separately.
 
