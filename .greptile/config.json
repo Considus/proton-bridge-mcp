@@ -1,0 +1,14 @@
+{
+  "labels": ["greptile"],
+  "triggerOnUpdates": false,
+  "triggerOnDrafts": false,
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax"],
+  "fileChangeLimit": 60,
+  "excludeAuthors": ["dependabot[bot]", "renovate[bot]"],
+  "ignorePatterns": "dist/**\n__pycache__/**\nassets/**\nattachments/**\n*.mcpb",
+  "statusCheck": true,
+  "fixWithAI": true,
+  "includeConfidenceScore": true,
+  "instructions": "A standard-library-only Python MCP server that gives an assistant read, organise and gated send access to Proton Mail through a local Bridge. It handles somebody's private email, so weight the review towards security and data egress: what message or attachment content is allowed to influence, where attachments may be written, and whether a mutating tool has kept its confirmation gate. Reviews cost a credit from a 30-a-month budget, so spend the comments on correctness, security and broken contracts rather than taste. The organisation-level custom context carries the standing rules: the Python 3.9 floor, the standard-library constraint, the generated manifest, the hostile-mail rule and the no-hard-delete rule. CONTRIBUTING.md and AGENTS.md are the source of truth for the ground rules and the release order."
+}
