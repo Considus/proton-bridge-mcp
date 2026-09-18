@@ -1,6 +1,6 @@
 {
   "labels": ["greptile"],
-  "triggerOnUpdates": false,
+  "autoReview": ["open"],
   "triggerOnDrafts": false,
   "strictness": 2,
   "commentTypes": ["logic", "syntax"],
