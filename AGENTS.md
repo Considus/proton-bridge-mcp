@@ -50,7 +50,7 @@ Capture the **before** while you are still reproducing the problem, which is whe
 
 ## Ship
 
-Open the PR with the evidence in the body: what changed, how it was tested, the risks. Run the title and body through the anti-slop pass before posting.
+Open the PR with the evidence in the body: what changed, how it was tested, the risks. The title and body take no house standard (owner, 2026-09-19): git mechanics are not read as writing, even here where the repo is public. The documents in this repo are a different matter, and `.claude/rules/writing-public-copy.md` governs them.
 
 **Greptile costs a credit and the account has 30 a month.** A review runs only on a PR carrying the `greptile` label, set in `.greptile/config.json`. Anything touching the send gate, the attachment path, or what message content is allowed to influence is worth the label. A docs fix or a version bump is not. Do not run a loop that re-reviews until it scores 5/5; each pass is another credit.
 
