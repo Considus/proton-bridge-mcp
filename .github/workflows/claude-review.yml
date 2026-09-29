@@ -45,6 +45,10 @@ jobs:
             - correctness bugs, regressions and unhandled edge cases
             - security problems and data loss or corruption risks
             - changes that contradict the repo's documented rules
+            - a mismatch between the PR description and the diff: behaviour
+              the diff adds that the description does not mention, or a
+              claim the description makes that the diff does not do (quote
+              the description line)
             Do not comment on style, naming or formatting unless it causes a bug.
             Skip generated output, built HTML/CSS, images, fonts and lockfiles.
 
