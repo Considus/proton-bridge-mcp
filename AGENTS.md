@@ -54,7 +54,7 @@ Open the PR with the evidence in the body: what changed, how it was tested, the 
 
 **Greptile costs a credit and the account has 30 a month.** A review runs only on a PR carrying the `greptile` label, set in `.greptile/config.json`. Anything touching the send gate, the attachment path, or what message content is allowed to influence is worth the label. A docs fix or a version bump is not. Do not run a loop that re-reviews until it scores 5/5; each pass is another credit.
 
-Present the PR URL and stop. Merging is a separate decision.
+Present the PR URL. Once Mark has approved the work and CI is green, merge it.
 
 ## Releasing
 
