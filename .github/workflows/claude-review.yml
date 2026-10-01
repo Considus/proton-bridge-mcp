@@ -36,9 +36,6 @@ jobs:
         with:
           fetch-depth: 1
 
-      - id: start
-        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
       - id: review
         uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790 # v1.0.235
         with:
@@ -73,22 +70,38 @@ jobs:
         env:
           EXEC: ${{ steps.review.outputs.execution_file }}
         run: |
-          jq -r '[.[] | select(.type == "result")] | last | .permission_denials // []
-                 | .[] | "refused: \(.tool_name) \(.tool_input | tostring | .[0:200])"' "$EXEC" || true
+          jq -r '[.[] | select(.type == "result")] | last
+                 | if . == null then "no result message in the execution file"
+                   elif (.permission_denials // []) == [] then "no tool calls were refused"
+                   else .permission_denials[] | "refused: \(.tool_name) \(.tool_input | tostring | .[0:200])" end' "$EXEC" \
+            || echo "::warning::Could not read the execution file, so refused tool calls are not listed."
 
       - name: Fail if the review posted nothing
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
-          SINCE: ${{ steps.start.outputs.at }}
+          RUN_ID: ${{ github.run_id }}
+          RAN: ${{ steps.review.outputs.execution_file != '' }}
         run: |
-          by_bot='select(.user.login == "claude[bot]")'
-          n=$( { gh api --paginate "repos/$REPO/issues/$PR/comments" --jq ".[] | $by_bot | select(.created_at >= \"$SINCE\") | .id"
-                 gh api --paginate "repos/$REPO/pulls/$PR/comments"  --jq ".[] | $by_bot | select(.created_at >= \"$SINCE\") | .id"
-                 gh api --paginate "repos/$REPO/pulls/$PR/reviews"   --jq ".[] | $by_bot | select(.submitted_at >= \"$SINCE\") | .id"
-               } | wc -l )
-          echo "review comments posted since $SINCE: $n"
+          if [ "$RAN" != "true" ]; then
+            echo "::error::The review did not run (see the review step's warning). claude-code-action never reviews a PR that edits this workflow file, so review such a PR locally."
+            exit 1
+          fi
+          # GitHub's clock, not the runner's: the comments carry GitHub timestamps.
+          since=$(gh api "repos/$REPO/actions/runs/$RUN_ID" --jq .run_started_at) \
+            || { echo "::error::Could not read this run's start time."; exit 1; }
+          # The Claude App posts as claude[bot]; without the app installed the
+          # action falls back to the workflow token, which posts as github-actions[bot].
+          who='(.user.login == "claude[bot]" or .user.login == "github-actions[bot]")'
+          n=0
+          for spec in "issues/$PR/comments created_at" "pulls/$PR/comments created_at" "pulls/$PR/reviews submitted_at"; do
+            set -- $spec
+            counts=$(gh api --paginate "repos/$REPO/$1" --jq "[.[] | select($who and .$2 >= \"$since\")] | length") \
+              || { echo "::error::Could not read $1, so cannot tell whether the review posted."; exit 1; }
+            for c in $counts; do n=$((n + c)); done
+          done
+          echo "review comments posted since $since: $n"
           if [ "$n" -eq 0 ]; then
             echo "::error::The review finished without posting anything, so this PR has not been reviewed. Re-run this job."
             exit 1
