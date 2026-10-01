@@ -3,6 +3,11 @@ name: Claude review
 # Reviews each PR once when it opens, reopens or leaves draft, on the Claude
 # subscription (CLAUDE_CODE_OAUTH_TOKEN). Later pushes are not re-reviewed, to
 # keep plan usage down; close and reopen the PR to get a fresh review.
+#
+# The job FAILS if the review posts nothing. A run can end `success` having
+# reviewed nothing (2026-10-01, Considus-Ops #123: two turns, 8 refused tool
+# calls, no comment), and a green check that means only "the job finished"
+# reads as "reviewed" to anyone merging. Refused tool calls are listed in the log.
 
 on:
   pull_request:
@@ -31,7 +36,11 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790 # v1.0.235
+      - id: start
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - id: review
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790 # v1.0.235
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
@@ -58,3 +67,29 @@ jobs:
             raising, post a single comment saying so.
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
+
+      - name: List tool calls the review was refused
+        if: always() && steps.review.outputs.execution_file != ''
+        env:
+          EXEC: ${{ steps.review.outputs.execution_file }}
+        run: |
+          jq -r '[.[] | select(.type == "result")] | last | .permission_denials // []
+                 | .[] | "refused: \(.tool_name) \(.tool_input | tostring | .[0:200])"' "$EXEC" || true
+
+      - name: Fail if the review posted nothing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+          SINCE: ${{ steps.start.outputs.at }}
+        run: |
+          by_bot='select(.user.login == "claude[bot]")'
+          n=$( { gh api --paginate "repos/$REPO/issues/$PR/comments" --jq ".[] | $by_bot | select(.created_at >= \"$SINCE\") | .id"
+                 gh api --paginate "repos/$REPO/pulls/$PR/comments"  --jq ".[] | $by_bot | select(.created_at >= \"$SINCE\") | .id"
+                 gh api --paginate "repos/$REPO/pulls/$PR/reviews"   --jq ".[] | $by_bot | select(.submitted_at >= \"$SINCE\") | .id"
+               } | wc -l )
+          echo "review comments posted since $SINCE: $n"
+          if [ "$n" -eq 0 ]; then
+            echo "::error::The review finished without posting anything, so this PR has not been reviewed. Re-run this job."
+            exit 1
+          fi
