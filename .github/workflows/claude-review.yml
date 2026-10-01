@@ -8,6 +8,11 @@ name: Claude review
 # reviewed nothing (2026-10-01, Considus-Ops #123: two turns, 8 refused tool
 # calls, no comment), and a green check that means only "the job finished"
 # reads as "reviewed" to anyone merging. Refused tool calls are listed in the log.
+#
+# Read-only git is allowed because the reviewer reaches for it to check its own
+# findings, and refused calls were the likely cause of that silent run. `fetch`
+# is in because the checkout is shallow. Running code (python3 and the like) is
+# not: it would execute the PR's code in a job holding a token.
 
 on:
   pull_request:
@@ -64,7 +69,7 @@ jobs:
             top-level comment summarising the review. If there is nothing worth
             raising, post a single comment saying so.
           claude_args: |
-            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Read,Grep,Glob"
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(git diff:*),Bash(git log:*),Bash(git show:*),Bash(git blame:*),Bash(git status:*),Bash(git rev-parse:*),Bash(git fetch:*),Read,Grep,Glob"
 
       - name: List tool calls the review was refused
         if: always() && steps.review.outputs.execution_file != ''
