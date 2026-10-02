@@ -92,7 +92,7 @@ jobs:
 
       - name: Count the review's comments
         id: first
-        if: always() && steps.review.outputs.execution_file != ''
+        if: ${{ !cancelled() && steps.review.outputs.execution_file != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
@@ -121,7 +121,7 @@ jobs:
 
       - id: retry
         name: Review again, once, because the first pass posted nothing
-        if: always() && steps.first.outputs.n == '0'
+        if: ${{ !cancelled() && steps.first.outputs.n == '0' }}
         uses: anthropics/claude-code-action@fd1c128679612beff4ca259c78021c506e8aa7a7 # v1.0.237
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -129,7 +129,7 @@ jobs:
           claude_args: ${{ env.REVIEW_ARGS }}
 
       - name: Fail if the review posted nothing
-        if: always()
+        if: ${{ !cancelled() }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
