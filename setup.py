@@ -317,6 +317,9 @@ CSS = """
   --ink:#0F0E0C; --dusk:#1C1A16; --starlight:#ECF1F5; --haze:#9AADB8;
   --slate:#4C5E6B; --cirrus:#EEF3F7; --drift:#D0DAE2;
   --stellar:#A0DCEE; --orbit:#1A9ABE; --anchor:#167890;
+  /* Brand error red (Catchlight --ruby), a light/dark pair. White on the light
+     tone is 6.05:1; on the dark tone it is 3.29:1, so dark mode sets Ink text. */
+  --ruby:#B82E2E; --on-ruby:#ffffff;
   --bg:var(--cirrus); --surface:#ffffff; --edge:rgba(0,0,0,0.08);
   --text:var(--ink); --muted:var(--slate); --accent:var(--orbit); --cta:var(--anchor);
   --serif:'Cormorant Garamond',Georgia,'Times New Roman',serif;
@@ -324,7 +327,8 @@ CSS = """
 }
 @media (prefers-color-scheme:dark){
   :root{ --bg:var(--ink); --surface:var(--dusk); --edge:rgba(255,255,255,0.06);
-         --text:var(--starlight); --muted:var(--haze); --accent:var(--stellar); --cta:var(--orbit); }
+         --text:var(--starlight); --muted:var(--haze); --accent:var(--stellar); --cta:var(--orbit);
+         --ruby:#E8635E; --on-ruby:var(--ink); }
 }
 *{box-sizing:border-box}
 /* Readability, matching considus.com: functional text is DM Sans 400 with
@@ -365,7 +369,7 @@ button{margin-top:28px;background:var(--cta);color:#fff;border:none;border-radiu
        padding:15px 32px;font-family:var(--sans);font-size:0.9rem;font-weight:400;
        letter-spacing:.04em;cursor:pointer}
 button:hover{filter:brightness(1.09)}
-.err{background:#7f1d1d;color:#fff;border-radius:11px;padding:16px 18px;margin:22px 0;font-size:0.9rem;line-height:1.7}
+.err{background:var(--ruby);color:var(--on-ruby);border-radius:11px;padding:16px 18px;margin:22px 0;font-size:0.9rem;line-height:1.7}
 .ok{border-left:3px solid var(--accent);padding-left:18px;margin:22px 0}
 code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;
      background:var(--bg);border:1px solid var(--edge);border-radius:7px;padding:2px 6px}
