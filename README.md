@@ -365,7 +365,7 @@ Write to privacy@considus.com, or open an issue at [github.com/Considus/proton-b
 
 This is free and stays that way. Apache 2.0 means you can take it, build on it, and ship it commercially without owing anything back, which is deliberate.
 
-Something broken or behaving oddly, [open an issue](https://github.com/Considus/proton-bridge-mcp/issues). Anything exploitable goes through GitHub's private reporting instead, described in [SECURITY.md](SECURITY.md), not a public issue. For anything that doesn't fit either, including press and licensing, it's <support@considus.com>, and the rest of the ways to reach us are at [considus.com/support](https://considus.com/support/).
+Something broken or behaving oddly, [open an issue](https://github.com/Considus/proton-bridge-mcp/issues). Anything exploitable goes through GitHub's private reporting or to <security@considus.com> instead, as described in [SECURITY.md](SECURITY.md), not a public issue. For anything that doesn't fit either, including press and licensing, it's <support@considus.com>, and the rest of the ways to reach us are at [considus.com/support](https://considus.com/support/).
 
 If it saved you an afternoon, there's [buymeacoffee.com/considus](https://buymeacoffee.com/considus). If it didn't, opening an issue when something breaks is worth more than the coffee.
 
