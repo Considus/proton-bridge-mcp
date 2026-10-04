@@ -2,7 +2,10 @@ name: Claude review
 
 # Reviews each PR once when it opens, reopens or leaves draft, on the Claude
 # subscription (CLAUDE_CODE_OAUTH_TOKEN). Later pushes are not re-reviewed, to
-# keep plan usage down; close and reopen the PR to get a fresh review.
+# keep plan usage down. For a fresh review of the latest commit, add the
+# 're-review' label (remove it first if it is already on). Closing and reopening
+# the PR also works, but it starts Greptile again too, which spends a credit.
+# A PR opened before this trigger existed needs its branch updated first.
 #
 # The job FAILS if the review posts nothing. A run can end `success` having
 # reviewed nothing (2026-10-01, Considus-Ops #123: two turns, 8 refused tool
@@ -21,10 +24,12 @@ name: Claude review
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
+    types: [opened, reopened, ready_for_review, labeled]
 
 concurrency:
-  group: claude-review-${{ github.event.pull_request.number }}
+  # A label run gets its own group, so adding a label (greptile, say) as a PR opens
+  # never cancels the review the opening started.
+  group: claude-review-${{ github.event.pull_request.number }}-${{ github.event.action == 'labeled' && github.event.label.name || 'open' }}
   cancel-in-progress: true
 
 jobs:
@@ -33,7 +38,8 @@ jobs:
     if: >-
       github.event.pull_request.draft == false &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.user.type != 'Bot'
+      github.event.pull_request.user.type != 'Bot' &&
+      (github.event.action != 'labeled' || github.event.label.name == 're-review')
     runs-on: ubuntu-latest
     env:
       REVIEW_PROMPT: |
