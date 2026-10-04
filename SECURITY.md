@@ -4,7 +4,7 @@ This is a tool for reading email with an assistant, so the whole thing is built 
 
 ## Reporting a vulnerability
 
-Please don't open a public issue for anything exploitable. Use GitHub's private reporting instead: go to the **Security** tab and choose **Report a vulnerability**. That opens a private advisory only you and I can see, and we can sort it out there before it's public.
+Please don't open a public issue for anything exploitable. Use GitHub's private reporting instead: go to the **Security** tab and choose **Report a vulnerability**. That opens a private advisory only you and I can see, and we can sort it out there before it's public. If you'd rather not use GitHub, email **security@considus.com**.
 
 Tell me what you found, how to reproduce it, and what it lets an attacker do. A proof of concept helps, but a clear description is plenty. I'll confirm I've received it within a few days, and I'll keep you posted while it's being fixed. Once there's a fix out, you're welcome to the credit if you want it.
 
