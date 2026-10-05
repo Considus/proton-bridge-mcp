@@ -1,0 +1,55 @@
+#!/bin/sh
+# Refuse a commit made while HEAD is main.
+#
+# "Branch always. Every change goes on a branch with a PR, in every repo, however
+# small" has been the written rule in CLAUDE.md for months, and until now nothing
+# checked it. The pre-push hook beside this one guards a different thing, that
+# what reaches main came through staging, and it only exists in the repos that
+# deploy. Three repos had no hooks at all, so a commit onto main there was never
+# refused by anything.
+#
+# Why a commit hook rather than a push hook: by push time the work is already on
+# main and getting it onto a branch means rewriting a ref somebody else may have
+# fetched. Refusing at commit costs one command to fix, and the fix is the thing
+# that should have happened anyway.
+#
+# Being local, it protects THIS machine only, and a fresh clone has to be told
+# where the hooks live:
+#
+#     git config core.hooksPath hooks
+#
+# Deliberate escape hatch, for the rare commit that genuinely belongs on main:
+#
+#     SKIP_BRANCH_CHECK=1 git commit ...
+#
+# It is an env var rather than a silent bypass so that using it is a decision.
+
+[ -n "$SKIP_BRANCH_CHECK" ] && exit 0
+
+# A merge in progress is the documented staging-to-main promotion, which is
+# allowed to land on main by definition. Fast-forward promotions never reach
+# this hook at all, because they create no commit.
+git_dir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+[ -e "$git_dir/MERGE_HEAD" ] && exit 0
+
+# Detached HEAD is deliberate and is not the mistake this is looking for.
+branch=$(git symbolic-ref --short HEAD 2>/dev/null) || exit 0
+
+[ "$branch" != "main" ] && exit 0
+
+echo "pre-commit: REFUSED. You are on main." >&2
+echo >&2
+echo "  Every change goes on a branch with a PR, in every repo, however small." >&2
+echo "  Nothing is lost: your staged changes are untouched by this refusal." >&2
+echo >&2
+echo "  Move them to a branch, from a NAMED ref rather than wherever HEAD is:" >&2
+echo >&2
+echo "    git checkout -b <branch> origin/main   # takes your changes with it" >&2
+echo "    git commit ..." >&2
+echo >&2
+echo "  Check first whether the work is already in flight: gh pr list, and look" >&2
+echo "  at the branch names, because a branch is invisible until it is pushed." >&2
+echo >&2
+echo "  Genuinely belongs on main: SKIP_BRANCH_CHECK=1 git commit ..." >&2
+
+exit 1
