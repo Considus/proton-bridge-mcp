@@ -78,11 +78,20 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Load the org review context
+        # Facts every Considus review needs, kept in one file (REVIEW-CONTEXT.md in the public
+        # Considus/.github repo) so a new fact is one edit there rather than a PR per repo.
+        # If it cannot be fetched, the review runs on its own prompt and the log says so.
+        run: |
+          ctx=$(curl -fsSL --max-time 20 https://raw.githubusercontent.com/Considus/.github/main/REVIEW-CONTEXT.md) \
+            || { echo "::warning::Could not fetch REVIEW-CONTEXT.md; reviewing without it."; ctx=""; }
+          { echo 'REVIEW_CONTEXT<<__REVIEW_CONTEXT__'; printf '\n%s\n' "$ctx"; echo '__REVIEW_CONTEXT__'; } >> "$GITHUB_ENV"
+
       - id: review
         uses: anthropics/claude-code-action@fd1c128679612beff4ca259c78021c506e8aa7a7 # v1.0.237
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: ${{ env.REVIEW_PROMPT }}
+          prompt: ${{ format('{0}{1}', env.REVIEW_PROMPT, env.REVIEW_CONTEXT) }}
           claude_args: ${{ env.REVIEW_ARGS }}
 
       - name: List tool calls the review was refused
@@ -131,7 +140,7 @@ jobs:
         uses: anthropics/claude-code-action@fd1c128679612beff4ca259c78021c506e8aa7a7 # v1.0.237
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: ${{ env.REVIEW_PROMPT }}
+          prompt: ${{ format('{0}{1}', env.REVIEW_PROMPT, env.REVIEW_CONTEXT) }}
           claude_args: ${{ env.REVIEW_ARGS }}
 
       - name: Fail if the review posted nothing
