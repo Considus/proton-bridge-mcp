@@ -32,8 +32,9 @@ msg_file="$1"
 # Comment lines are stripped by git before the message is stored, so a match
 # inside one is not a real match. Strip them the same way before looking, and
 # drop everything from the scissors line down, which is where `git commit -v`
-# puts the diff.
-body=$(sed '/^# -* >8 -*$/,$d' "$msg_file" | grep -v '^#')
+# puts the diff. Git's own comment lines are "# text" or a bare "#". A line such
+# as "#123 fix" given with -m is not one of them, and git keeps it, so it is checked.
+body=$(sed '/^# -* >8 -*$/,$d' "$msg_file" | grep -vE '^#([[:space:]]|$)')
 
 if [ -z "$SKIP_ATTRIBUTION_CHECK" ]; then
   hit=$(printf '%s\n' "$body" | grep -niE \
