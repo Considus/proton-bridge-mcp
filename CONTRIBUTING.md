@@ -69,7 +69,7 @@ The order matters, because the archive carries timestamps. The build is not repr
 
    Read the status back from `/v0/servers/com.considus%2Fproton-bridge-mcp/versions`. The `?search=` listing reports every version as active regardless, and will tell you the change failed when it did not.
 
-10. **Rebuild the website if this README changed.** considus.com's product pages are generated from it, by `build-product-pages.py` in `Considus-Ops`.
+10. **Rebuild the website if this README changed.** considus.com's product page is built from this README, so rebuild the site after changing it.
 
 ## Proposing a change
 
