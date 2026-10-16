@@ -29,15 +29,21 @@
 msg_file="$1"
 [ -f "$msg_file" ] || exit 0
 
-# Everything above the scissors line is read, comment lines included. Git
-# strips "#" lines only when it opens an editor. With -m or -F it stores them,
-# and a hook cannot tell which mode it is in. Git's own comment lines carry no
-# dash or attribution text (it quotes non-ASCII paths by default), so reading
-# them refuses nothing real. A dash typed in a comment line is refused even
-# when git would have dropped it: remove it, or use the escape hatch.
-# Everything from the scissors line down is the diff `git commit -v` shows,
-# which git never stores, so it is skipped.
-body=$(sed '/^# -* >8 -*$/,$d' "$msg_file")
+# Read the message as git will store it. Two parts are dropped. First,
+# everything from the scissors line down, the diff `git commit -v` shows.
+# Second, the trailing block of comment lines ("# text" or a bare "#") and
+# blank lines. That block is where git puts its own template when it opens an
+# editor (status, branch name, file paths and, in a rebase, other commits'
+# subjects), and git drops it. Every line above it is read, comment or not,
+# because with -m or -F git stores "#" lines. The one gap: a "# text" line
+# given as the very last line with -m is stored by git but not read here.
+body=$(sed '/^# -* >8 -*$/,$d' "$msg_file" | awk '
+  { line[NR] = $0 }
+  END {
+    n = NR
+    while (n > 0 && (line[n] ~ /^#([ \t]|$)/ || line[n] ~ /^[ \t]*$/)) n--
+    for (i = 1; i <= n; i++) print line[i]
+  }')
 
 if [ -z "$SKIP_ATTRIBUTION_CHECK" ]; then
   hit=$(printf '%s\n' "$body" | grep -niE \
