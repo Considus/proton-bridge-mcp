@@ -1,5 +1,5 @@
 #!/bin/sh
-# Refuse a commit message carrying a Claude attribution footer.
+# Refuse a commit message carrying a Claude attribution footer, or an em or en dash.
 #
 # "No Claude attribution, ever" is a standing owner rule and nothing checked it.
 # It is not a style preference: the prose in this workspace is Mark's, reviewed
@@ -10,41 +10,69 @@
 # It has happened. Two commits in the last 200 carry one in each of the two ops
 # repos, which is what a rule with no mechanism looks like over time.
 #
+# Dashes are the owner's writing rule for all writing, plain or public: no em
+# dash (U+2014) and no en dash (U+2013), and a hyphen in number ranges. Commit
+# messages are writing, so they follow it. Semicolons are left alone here
+# because commit messages quote code, where they belong.
+#
 # Being local, it protects THIS machine only, and a fresh clone has to be told
 # where the hooks live:
 #
 #     git config core.hooksPath hooks
 #
-# Escape hatch, for the case where the text is genuinely being quoted rather
-# than claimed:
+# Escape hatches, for the case where the text is genuinely being quoted rather
+# than claimed or written:
 #
 #     SKIP_ATTRIBUTION_CHECK=1 git commit ...
-
-[ -n "$SKIP_ATTRIBUTION_CHECK" ] && exit 0
+#     SKIP_DASH_CHECK=1 git commit ...
 
 msg_file="$1"
 [ -f "$msg_file" ] || exit 0
 
 # Comment lines are stripped by git before the message is stored, so a match
-# inside one is not a real match. Strip them the same way before looking.
-body=$(grep -v '^#' "$msg_file")
+# inside one is not a real match. Strip them the same way before looking, and
+# drop everything from the scissors line down, which is where `git commit -v`
+# puts the diff.
+body=$(sed '/^# -* >8 -*$/,$d' "$msg_file" | grep -v '^#')
 
-hit=$(printf '%s\n' "$body" | grep -niE \
-  'co-authored-by:[[:space:]]*claude|generated with .*claude|🤖[[:space:]]*generated|noreply@anthropic\.com')
+if [ -z "$SKIP_ATTRIBUTION_CHECK" ]; then
+  hit=$(printf '%s\n' "$body" | grep -niE \
+    'co-authored-by:[[:space:]]*claude|generated with .*claude|🤖[[:space:]]*generated|noreply@anthropic\.com')
+
+  if [ -n "$hit" ]; then
+    echo "commit-msg: REFUSED. The message carries a Claude attribution footer." >&2
+    echo >&2
+    printf '%s\n' "$hit" | sed 's/^/    /' >&2
+    echo >&2
+    echo "  No Claude attribution, ever. The commit author already records who" >&2
+    echo "  committed, and the writing is attributed to a person, not a tool." >&2
+    echo >&2
+    echo "  Your message is kept. Edit it and commit again:" >&2
+    echo >&2
+    echo "    git commit --edit --file .git/COMMIT_EDITMSG" >&2
+    echo >&2
+    echo "  Genuinely quoting the text: SKIP_ATTRIBUTION_CHECK=1 git commit ..." >&2
+    exit 1
+  fi
+fi
+
+[ -n "$SKIP_DASH_CHECK" ] && exit 0
+
+# Built from bytes so the pattern is visible in the source: U+2014 and U+2013 in UTF-8.
+em=$(printf '\342\200\224')
+en=$(printf '\342\200\223')
+hit=$(printf '%s\n' "$body" | grep -nF -e "$em" -e "$en")
 
 [ -z "$hit" ] && exit 0
 
-echo "commit-msg: REFUSED. The message carries a Claude attribution footer." >&2
+echo "commit-msg: REFUSED. No em or en dashes: use a comma, colon, parentheses or two sentences; a hyphen for number ranges." >&2
 echo >&2
 printf '%s\n' "$hit" | sed 's/^/    /' >&2
-echo >&2
-echo "  No Claude attribution, ever. The commit author already records who" >&2
-echo "  committed, and the writing is attributed to a person, not a tool." >&2
 echo >&2
 echo "  Your message is kept. Edit it and commit again:" >&2
 echo >&2
 echo "    git commit --edit --file .git/COMMIT_EDITMSG" >&2
 echo >&2
-echo "  Genuinely quoting the text: SKIP_ATTRIBUTION_CHECK=1 git commit ..." >&2
+echo "  Genuinely quoting the text: SKIP_DASH_CHECK=1 git commit ..." >&2
 
 exit 1
