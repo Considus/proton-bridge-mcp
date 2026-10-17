@@ -14,7 +14,8 @@ name: Claude review
 #
 # The prompt makes the review post a top-level comment even when it finds
 # nothing, because a no-findings run that answered only in its final message
-# posted nothing (2026-10-16: six runs, all `success`, no comment). The check below still fails a run that truly posts nothing.
+# posted nothing (2026-10-16: six runs, all `success`, no comment). The
+# check below still fails a run that truly posts nothing.
 #
 # A silent run is retried ONCE inside the same job before it fails, because a
 # re-run of the whole job was the usual fix and it cost a manual round trip
