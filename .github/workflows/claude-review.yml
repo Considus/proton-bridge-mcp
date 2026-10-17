@@ -8,14 +8,14 @@ name: Claude review
 # A PR opened before this trigger existed needs its branch updated first.
 #
 # The job FAILS if the review posts nothing. A run can end `success` having
-# reviewed nothing (2026-10-01, Considus-Ops #123: two turns, 8 refused tool
-# calls, no comment), and a green check that means only "the job finished"
+# reviewed nothing (2026-10-01: two turns, 8 refused tool calls, no
+# comment), and a green check that means only "the job finished"
 # reads as "reviewed" to anyone merging. Refused tool calls are listed in the log.
 #
 # The prompt makes the review post a top-level comment even when it finds
 # nothing, because a no-findings run that answered only in its final message
-# posted nothing (2026-10-16, Catchlight-Ops #186: six runs, all `success`,
-# no comment). The check below still fails a run that truly posts nothing.
+# posted nothing (2026-10-16: six runs, all `success`, no comment). The
+# check below still fails a run that truly posts nothing.
 #
 # A silent run is retried ONCE inside the same job before it fails, because a
 # re-run of the whole job was the usual fix and it cost a manual round trip
