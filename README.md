@@ -24,7 +24,7 @@ Files can be attached to anything you send, though only from directories you've 
 | `folder_status` | Counts, plus the UIDVALIDITY every uid in that folder depends on |
 | `poll_folder` | What has arrived since you last looked |
 | `ack_folder` | Confirms a batch was handled |
-| `search_mail` | Search by text, sender, subject, date range, unread, starred; optionally report each message's other labels and folders |
+| `search_mail` | Search by text, sender, subject, date range, unread, starred, and optionally report each message's other labels and folders |
 | `search_all_mail` | The same search across every folder and label, duplicates collapsed |
 | `get_headers` | Headers with SPF, DKIM and DMARC verdicts, and Proton metadata |
 | `read_message` | Full headers and body |
@@ -140,7 +140,7 @@ me each one before you run it.
 
 In its own terminal, that's Terminal on macOS, PowerShell on Windows.
 
-You'll need `git` and [`uv`](https://astral.sh/uv), both free. Macs and most Linux machines have `git` already; Windows has neither, and `winget install Git.Git` followed by `winget install astral-sh.uv` in PowerShell puts that right, then open a fresh PowerShell window so they're found.
+You'll need `git` and [`uv`](https://astral.sh/uv), both free. Macs and most Linux machines have `git` already. Windows has neither, and `winget install Git.Git` followed by `winget install astral-sh.uv` in PowerShell puts that right, then open a fresh PowerShell window so they're found.
 
 **macOS and Linux**
 
