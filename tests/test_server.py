@@ -1490,6 +1490,175 @@ class Unsubscribe(unittest.TestCase):
                          "me.abc@passmail.example")
 
 
+class SendPartialRefusal(unittest.TestCase):
+    """A mail server can refuse some recipients and still take the message
+    for the rest. The result, and the audit record built from its first line,
+    must name every address the mail did not go to, and send_draft must keep
+    the draft so it can be sent again."""
+
+    GOOD, BAD = "good@a.example.test", "bad@b.example.test"
+
+    class FakeConn:
+        """One message in every folder, with MOVE, COPY and STORE recorded."""
+
+        def __init__(self, test):
+            self.t = test
+
+        def list(self):
+            return "OK", ['(\\HasNoChildren \\Drafts) "/" "Drafts"',
+                          '(\\HasNoChildren \\Trash) "/" "Trash"']
+
+        def select(self, mailbox, readonly=False):
+            return "OK", [b"1"]
+
+        def response(self, name):
+            return name, [b"1"]
+
+        def uid(self, cmd, uid, *args):
+            if cmd == "FETCH":
+                return "OK", [(b"1 (BODY[] {%d}" % len(self.t.raw), self.t.raw)]
+            self.t.binned.append(cmd)
+            return "OK", [b""]
+
+        def expunge(self):
+            self.t.binned.append("EXPUNGE")
+            return "OK", [b""]
+
+        def logout(self):
+            pass
+
+    def setUp(self):
+        import smtplib
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(server, k) for k in (
+            "USER", "ALIAS_FROM", "STATE_FILE", "AUDIT_LOG", "AUDIT_ENABLED",
+            "ATTACH_DIR", "imap_connect", "smtp_credentials", "_tls_context",
+            "_security_mode")}
+        self._smtp = smtplib.SMTP
+        server.USER, server.ALIAS_FROM = "owner@example.test", ""
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.AUDIT_ENABLED = True
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        server.smtp_credentials = lambda: ("owner@example.test", "x")
+        server._tls_context = lambda host: None
+        server._security_mode = lambda var, port: "starttls"
+        server.imap_connect = lambda: self.FakeConn(self)
+        self.env = mock.patch.dict(os.environ)
+        self.env.start()
+        os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+        self._tainted = set(server._TAINTED)
+        server._TAINTED.clear()
+        server._CORRESPONDENTS.clear()
+
+        self.raw = b""
+        self.binned, self.rcpts, self.commits = [], [], []
+        self.refuse = {self.BAD}
+        test = self
+
+        class FakeSMTP(smtplib.SMTP):
+            """Never connects. The real send_message and sendmail run, so the
+            refused-recipient dict is the one smtplib builds from RCPT."""
+            def __init__(self, *a, **k):
+                super(FakeSMTP, self).__init__()
+            def ehlo(self, name=""):
+                self.ehlo_resp = b"ok"
+                return 250, b"ok"
+            def starttls(self, **k):
+                return 220, b"ok"
+            def login(self, user, password, **k):
+                return 235, b"ok"
+            def mail(self, sender, options=()):
+                return 250, b"ok"
+            def rcpt(self, recip, options=()):
+                test.rcpts.append(recip)
+                if recip in test.refuse:
+                    return 550, b"5.1.1 no such user\nhere"
+                return 250, b"ok"
+            def data(self, msg):
+                test.commits.append(list(test.rcpts))
+                return 250, b"queued"
+            def send(self, s):
+                pass
+            def getreply(self):
+                return 221, b"bye"
+
+        smtplib.SMTP = FakeSMTP
+
+    def tearDown(self):
+        import smtplib
+        smtplib.SMTP = self._smtp
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+        self.env.stop()
+        server._TAINTED.clear()
+        server._TAINTED.update(self._tainted)
+        server._CORRESPONDENTS.clear()
+
+    def _call(self, name, arguments):
+        arguments = dict(arguments, confirmed=True)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": name, "arguments": arguments}})
+        res = json.loads(out.getvalue())["result"]
+        with open(server.AUDIT_LOG) as f:
+            recs = [json.loads(l) for l in f if l.strip()]
+        return res, recs[-1]
+
+    def _cases(self):
+        both = "%s, %s" % (self.GOOD, self.BAD)
+        mail = ("From: %s\r\nTo: owner@example.test\r\nCc: %s\r\n"
+                "Subject: hello\r\nMessage-ID: <m1@a.example.test>\r\n"
+                "List-Unsubscribe: <mailto:%s,%s>\r\n\r\nbody\r\n"
+                % (self.GOOD, self.BAD, self.GOOD, self.BAD)).encode()
+        draft = ("From: owner@example.test\r\nTo: %s\r\n"
+                 "Subject: hello\r\n\r\nbody\r\n" % both).encode()
+        return [
+            ("send", {"to": both, "subject": "s", "body": "b"}, b""),
+            ("reply_all", {"uid": "1", "body": "b"}, mail),
+            ("forward", {"uid": "1", "to": both}, mail),
+            ("unsubscribe", {"uid": "1", "send": True}, mail),
+            ("send_draft", {"uid": "1", "folder": "Drafts"}, draft),
+        ]
+
+    def test_refused_recipient_is_named_first_and_audited(self):
+        for name, arguments, raw in self._cases():
+            with self.subTest(tool=name):
+                self.raw, self.rcpts, self.commits = raw, [], []
+                res, rec = self._call(name, arguments)
+                self.assertFalse(res.get("isError"), res)
+                self.assertEqual(self.commits, [[self.GOOD, self.BAD]])
+                first = res["content"][0]["text"].splitlines()[0]
+                self.assertTrue(first.startswith("NOT sent to %s (550"
+                                                 % self.BAD), first)
+                self.assertNotIn("NOT sent to %s" % self.GOOD, first)
+                self.assertEqual(rec["tool"], name)
+                self.assertEqual(rec["outcome"], "ok")
+                self.assertIn("NOT sent to %s" % self.BAD, rec.get("detail", ""))
+
+    def test_partly_refused_draft_is_kept(self):
+        _, _, draft = self._cases()[-1]
+        self.raw = draft
+        res, _ = self._call("send_draft", {"uid": "1", "folder": "Drafts"})
+        self.assertEqual(self.binned, [], "the draft was binned")
+        self.assertIn("kept", res["content"][0]["text"])
+        self.assertIn("Do not send it again", res["content"][0]["text"])
+
+    def test_full_delivery_says_nothing_was_refused(self):
+        self.refuse = set()
+        for name, arguments, raw in self._cases():
+            with self.subTest(tool=name):
+                self.raw, self.rcpts, self.commits, self.binned = raw, [], [], []
+                res, rec = self._call(name, arguments)
+                self.assertFalse(res.get("isError"), res)
+                self.assertNotIn("NOT sent", res["content"][0]["text"])
+                self.assertEqual(self.commits, [[self.GOOD, self.BAD]])
+                if name == "send_draft":
+                    self.assertEqual(self.binned, ["MOVE"])
+
+
 class TlsPolicy(unittest.TestCase):
     """Verification off is correct for Bridge on loopback and dangerous
     anywhere else. The host is configurable, so this must not be blanket."""
