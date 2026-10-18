@@ -1644,6 +1644,7 @@ class SendPartialRefusal(unittest.TestCase):
         res, _ = self._call("send_draft", {"uid": "1", "folder": "Drafts"})
         self.assertEqual(self.binned, [], "the draft was binned")
         self.assertIn("kept", res["content"][0]["text"])
+        self.assertIn("Do not send it again", res["content"][0]["text"])
 
     def test_full_delivery_says_nothing_was_refused(self):
         self.refuse = set()

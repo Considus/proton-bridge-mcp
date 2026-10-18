@@ -1503,8 +1503,10 @@ def tool_send_draft(args):
     if refused:
         return (_refused_note(refused) + "Draft sent to the other recipients "
                 "only. The draft was kept in '%s' as uid %s, not moved to "
-                "Trash.\n  From: %s\n  To: %s\n  Subject: %s"
-                % (folder, uid, _decode(msg.get("From")), to,
+                "Trash. Do not send it again as it is: everyone else already "
+                "has it. Edit it down to the refused recipients first."
+                "\n  From: %s\n  To: %s\n  Cc: %s\n  Subject: %s"
+                % (folder, uid, _decode(msg.get("From")), to, cc or "(none)",
                    _decode(msg.get("Subject"))))
 
     # The message has gone. A cleanup failure from here on must not read as a
