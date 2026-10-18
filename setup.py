@@ -266,11 +266,33 @@ def mcp_settings(iuser, alias_from, ihost, iport, suser, shost, sport,
     return v
 
 
+# Every key mcp_settings can write. Any other key in settings.json was put there
+# by the owner (PROTON_MODE, rate limits, file locations) and is kept on save.
+MANAGED_KEYS = ("PROTON_USER", "PROTON_IMAP_HOST", "PROTON_IMAP_PORT",
+                "PROTON_SMTP_HOST", "PROTON_SMTP_PORT", "PROTON_IMAP_SECURITY",
+                "PROTON_SMTP_SECURITY", "PROTON_SMTP_USER", "PROTON_ALIAS_FROM")
+
+
 def save_settings(values):
-    """Write non-secret settings only. Passwords live in the credential store."""
+    """Write non-secret settings only. Passwords live in the credential store.
+    Replaces the keys this form manages and keeps every other key already in
+    settings.json. Refuses to overwrite a file it cannot read as a JSON object."""
+    merged = {}
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                merged = json.load(f)
+        except (OSError, ValueError):
+            merged = None
+        if not isinstance(merged, dict):
+            raise RuntimeError("%s could not be read as settings, so it was left as it is. "
+                               "Fix or remove it, then try again." % SETTINGS_FILE)
+    for key in MANAGED_KEYS:
+        merged.pop(key, None)
+    merged.update(values)
     tmp = SETTINGS_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(values, f, indent=2)
+        json.dump(merged, f, indent=2)
     os.replace(tmp, SETTINGS_FILE)
     try:
         os.chmod(SETTINGS_FILE, 0o600)
@@ -637,7 +659,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         settings = mcp_settings(user, g("alias_from"), ihost, iport_i,
                                 smtp_user, shost, sport_i, isec, ssec)
-        saved_to = save_settings(settings)
+        try:
+            saved_to = save_settings(settings)
+        except RuntimeError as e:
+            self._send(form_page(existing=EXISTING, error=str(e))); return
         self._send(done_page(user, store, mailboxes, saved_to))
         threading.Thread(target=lambda: (time.sleep(1.5),
                                          self.server.shutdown()), daemon=True).start()
