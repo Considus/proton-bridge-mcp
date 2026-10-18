@@ -1274,6 +1274,189 @@ class SendQuitAfterCommit(unittest.TestCase):
         self.assertEqual(self.commits, [])
 
 
+class DraftBinning(unittest.TestCase):
+    """update_draft and send_draft bin the old draft after the irreversible
+    step. A refused copy into Trash must leave the draft where it is, never
+    expunge it, and a cleanup failure after sending must not read as a failed
+    send, or a retry sends the message twice."""
+
+    class FakeConn:
+        """A Drafts and a Trash folder with scripted MOVE and COPY replies."""
+
+        def __init__(self, test):
+            self.t = test
+            self.selected = None
+
+        def list(self):
+            return "OK", ['(\\HasNoChildren \\Drafts) "/" "Drafts"',
+                          '(\\HasNoChildren \\Trash) "/" "Trash"']
+
+        def select(self, mailbox, readonly=False):
+            self.selected = mailbox.strip('"')
+            return "OK", [b"1"]
+
+        def response(self, name):
+            return name, [b"1"]
+
+        def append(self, mailbox, flags, date, raw):
+            box = self.t.box[mailbox.strip('"')]
+            box[str(max([int(u) for u in box] + [0]) + 1)] = raw
+            return "OK", [b"done"]
+
+        def uid(self, cmd, uid, *args):
+            box = self.t.box[self.selected]
+            if cmd == "FETCH":
+                return "OK", [(b"1 (BODY[] {1}", box[uid])]
+            if cmd == "STORE":
+                self.t.deleted.add(uid)
+                return "OK", [b""]
+            reply = self.t.replies.get(cmd, "OK")
+            self.t.log.append((cmd, uid, reply))
+            if reply == "BAD":
+                raise server.imaplib.IMAP4.error("BAD %s not supported" % cmd)
+            if reply == "DROP":
+                raise OSError("connection reset by peer")
+            if reply != "OK":
+                return reply, [b"[OVERQUOTA] Trash is over quota"]
+            dest = self.t.box[args[0].strip('"')]
+            dest[str(len(dest) + 1)] = box[uid]
+            if cmd == "MOVE":
+                del box[uid]
+            return "OK", [b""]
+
+        def expunge(self):
+            box = self.t.box[self.selected]
+            for uid in list(self.t.deleted):
+                box.pop(uid, None)
+            self.t.deleted.clear()
+            return "OK", [b""]
+
+        def logout(self):
+            pass
+
+    RAW = (b"From: owner@example.test\r\nTo: friend@example.test\r\n"
+           b"Subject: hello\r\n\r\nbody\r\n")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(server, k) for k in (
+            "USER", "ALIAS_FROM", "STATE_FILE", "AUDIT_LOG", "AUDIT_ENABLED",
+            "ATTACH_DIR", "imap_connect", "_smtp_send")}
+        server.USER, server.ALIAS_FROM = "owner@example.test", ""
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.AUDIT_ENABLED = True
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        self.env = mock.patch.dict(os.environ)
+        self.env.start()
+        os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+        self._tainted = set(server._TAINTED)
+        server._TAINTED.clear()
+        self.box = {"Drafts": {"1": self.RAW}, "Trash": {}}
+        self.deleted, self.log, self.replies = set(), [], {}
+        self.sent = []
+        server._smtp_send = self.sent.append
+        self.connects = 0
+        self.refuse_connect_from = None
+
+        def connect():
+            self.connects += 1
+            if self.refuse_connect_from and self.connects >= self.refuse_connect_from:
+                raise server.ToolError("Cannot reach the IMAP server at "
+                                       "127.0.0.1:1143 (refused).")
+            return self.FakeConn(self)
+        server.imap_connect = connect
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+        self.env.stop()
+        server._TAINTED.clear()
+        server._TAINTED.update(self._tainted)
+
+    def _call(self, name, args):
+        req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": name, "arguments": args}}
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            server.handle(req)
+        reply = json.loads(out.getvalue())["result"]
+        with open(server.AUDIT_LOG) as f:
+            outcome = [json.loads(l)["outcome"] for l in f if l.strip()]
+        return reply, reply["content"][0]["text"], outcome
+
+    def _send_draft(self):
+        return self._call("send_draft", {"uid": "1", "confirmed": True})
+
+    def test_send_draft_cleanup_connection_failure_is_not_a_failed_send(self):
+        self.refuse_connect_from = 2
+        reply, text, outcome = self._send_draft()
+        self.assertEqual(len(self.sent), 1)
+        self.assertFalse(reply.get("isError"), text)
+        self.assertEqual(outcome, ["ok"])
+        self.assertIn("WAS SENT", text)
+        self.assertIn("still in 'Drafts'", text)
+        self.assertIn("1", self.box["Drafts"])
+
+    def test_send_draft_move_refused_does_not_claim_trash(self):
+        self.replies = {"MOVE": "NO", "COPY": "NO"}
+        reply, text, outcome = self._send_draft()
+        self.assertEqual(len(self.sent), 1)
+        self.assertFalse(reply.get("isError"), text)
+        self.assertEqual(outcome, ["ok"])
+        self.assertNotIn("has been moved to Trash", text)
+        self.assertIn("still in 'Drafts'", text)
+        self.assertIn("1", self.box["Drafts"])
+
+    def test_send_draft_refused_copy_never_expunges_the_draft(self):
+        self.replies = {"MOVE": "BAD", "COPY": "NO"}
+        reply, text, outcome = self._send_draft()
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.box["Drafts"], {"1": self.RAW},
+                         "draft hard-deleted, log %r" % self.log)
+        self.assertEqual(self.box["Trash"], {})
+        self.assertIn("still in 'Drafts'", text)
+
+    def test_send_draft_bins_the_draft_when_trash_accepts_it(self):
+        self.replies = {"MOVE": "BAD", "COPY": "OK"}
+        reply, text, outcome = self._send_draft()
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.box["Drafts"], {})
+        self.assertEqual(list(self.box["Trash"].values()), [self.RAW])
+        self.assertIn("has been moved to Trash", text)
+
+    def test_update_draft_refused_copy_never_expunges_the_original(self):
+        self.replies = {"MOVE": "NO", "COPY": "NO"}
+        reply, text, outcome = self._call(
+            "update_draft", {"uid": "1", "body": "new body"})
+        self.assertFalse(reply.get("isError"), text)
+        self.assertEqual(self.box["Drafts"].get("1"), self.RAW,
+                         "original hard-deleted, log %r" % self.log)
+        self.assertEqual(len(self.box["Drafts"]), 2)
+        self.assertEqual(self.box["Trash"], {})
+        self.assertNotIn("previous version is in Trash", text)
+        self.assertIn("still in 'Drafts'", text)
+
+    def test_update_draft_cleanup_failure_still_reports_the_saved_draft(self):
+        # The replacement is already appended when binning fails, so the call
+        # must say so rather than fail: a retry would save a second copy.
+        self.replies = {"MOVE": "DROP"}
+        reply, text, outcome = self._call(
+            "update_draft", {"uid": "1", "body": "new body"})
+        self.assertFalse(reply.get("isError"), text)
+        self.assertEqual(len(self.box["Drafts"]), 2)
+        self.assertIn("Draft replaced", text)
+        self.assertIn("still in 'Drafts'", text)
+
+    def test_update_draft_bins_the_original_when_copy_succeeds(self):
+        self.replies = {"MOVE": "NO", "COPY": "OK"}
+        reply, text, outcome = self._call(
+            "update_draft", {"uid": "1", "body": "new body"})
+        self.assertNotIn("1", self.box["Drafts"])
+        self.assertEqual(list(self.box["Trash"].values()), [self.RAW])
+        self.assertIn("previous version is in Trash", text)
+
+
 class Unsubscribe(unittest.TestCase):
     def _msg(self, unsub, extra=""):
         return email.message_from_string(
