@@ -1299,6 +1299,22 @@ class Protocol(unittest.TestCase):
             self.assertNotIn(gone, tools)
         self.assertIn("read_message", tools)
 
+    def test_organise_registers_no_tool_that_sends(self):
+        # unsubscribe sends a mailto: unsubscribe over SMTP, to an address the
+        # sender of the newsletter chose, so organise must not offer it.
+        tmp = tempfile.mkdtemp()
+        msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
+                   env={"PROTON_MODE": "organise",
+                        "PROTON_USER": "me@example.test",
+                        "PROTON_SETTINGS_FILE": os.devnull,
+                        "PROTON_STATE_FILE": os.path.join(tmp, "state.json"),
+                        "PROTON_AUDIT_LOG": os.path.join(tmp, "audit.log"),
+                        "PROTON_ATTACH_DIR": os.path.join(tmp, "attachments")})
+        tools = [t["name"] for m in msgs if m.get("id") == 2
+                 for t in m["result"]["tools"]]
+        self.assertIn("move_to_folder", tools)
+        self.assertEqual(sorted(set(tools) & server._SEND_TOOLS), [])
+
     def test_send_refuses_without_confirmation(self):
         msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
                            "params": {"name": "send", "arguments": {

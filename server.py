@@ -298,7 +298,7 @@ def _rate_check(tool):
 # ----------------------------------------------------------------------------
 # Permission mode
 # ----------------------------------------------------------------------------
-_ORGANISE_ONLY = {"send", "forward", "reply", "reply_all", "send_draft"}
+_ORGANISE_ONLY = set(_SEND_TOOLS)
 
 
 def _mode():
