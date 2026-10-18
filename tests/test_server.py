@@ -1999,7 +1999,10 @@ class EightBitHeaders(unittest.TestCase):
                 spec = args[0]
                 if isinstance(spec, bytes):
                     spec = spec.decode()
-                out = [(("%s (UID %s FLAGS (\\Seen)" % (u, u)).encode(), raw)
+                # A real server reports the arrival time and size it assigned,
+                # which search_all_mail needs to tell copies from look-alikes.
+                out = [(("%s (UID %s INTERNALDATE \"01-Jan-2026 00:00:00 +0000\" "
+                         "RFC822.SIZE %d FLAGS (\\Seen)" % (u, u, len(raw))).encode(), raw)
                        for u, raw in box.items() if spec in ("1:*", u)]
                 return ("OK", out) if out else ("NO", None)
             if cmd == "STORE":
