@@ -28,7 +28,16 @@ Capture the **before** while reproducing and the **after** once it works, usuall
 
 ## Ship
 
-1. Switch on the committed hooks once per clone: `git config core.hooksPath hooks`. `hooks/pre-commit` refuses a commit on `main`; `hooks/commit-msg` refuses a Claude attribution footer or an em or en dash.
+1. Install the committed hooks once per clone, copied from `origin/main` into git's own hooks folder. `hooks/pre-commit` refuses a commit on `main`; `hooks/commit-msg` refuses a Claude attribution footer or an em or en dash.
+
+   ```bash
+   git fetch origin
+   git config --unset core.hooksPath
+   d="$(git rev-parse --git-common-dir)/hooks"; mkdir -p "$d"
+   for h in pre-commit commit-msg; do git show "origin/main:hooks/$h" > "$d/$h" && chmod 755 "$d/$h"; done
+   ```
+
+   Never set `core.hooksPath` to `hooks`. Git would then run the hook files of whichever branch is checked out, so checking out an outsider's PR would run their code on your machine. The unset line removes that setting from a clone that followed the old instruction; while it is set, git ignores its own hooks folder. Copy again after a reviewed change to `hooks/` lands on `main`.
 2. Check nobody is already on the work, then branch from `origin/main` by name:
 
    ```bash
