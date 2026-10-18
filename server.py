@@ -219,6 +219,22 @@ def _rotate_audit():
         pass
 
 
+_AUDIT_MAX_DEPTH = 8
+
+
+def _audit_clip(v, depth=0):
+    """Copy an argument for the audit record, cutting off lists and objects
+    nested deeper than _AUDIT_MAX_DEPTH. Deeper nesting makes json.dumps fail,
+    which would lose the record of a call that has already run."""
+    if isinstance(v, (list, dict)) and depth >= _AUDIT_MAX_DEPTH:
+        return "<nested too deep, not logged>"
+    if isinstance(v, list):
+        return [_audit_clip(x, depth + 1) for x in v]
+    if isinstance(v, dict):
+        return {k: _audit_clip(x, depth + 1) for k, x in v.items()}
+    return v
+
+
 def _audit(tool, args, outcome, detail=""):
     """Never raises. A failure to log must not break the operation."""
     if not AUDIT_ENABLED:
@@ -232,15 +248,21 @@ def _audit(tool, args, outcome, detail=""):
                 continue
             if isinstance(v, str) and len(v) > 200:
                 v = v[:200] + "..."
-            safe[k] = v
+            safe[k] = _audit_clip(v)
         record = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "tool": tool,
                   "outcome": outcome, "args": safe}
         if detail:
             record["detail"] = str(detail)[:300]
+        try:
+            line = json.dumps(record)
+        except Exception:
+            # Still record that the call happened, without its arguments.
+            record["args"] = "<could not be logged>"
+            line = json.dumps(record)
         _rotate_audit()
         fd = os.open(AUDIT_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         with os.fdopen(fd, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+            f.write(line + "\n")
     except Exception:
         pass
 
