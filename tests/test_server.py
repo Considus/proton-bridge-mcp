@@ -518,7 +518,10 @@ class Audit(unittest.TestCase):
         server.STATE_FILE = os.path.join(self.tmp, "state.json")
         server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
         server._smtp_send = sent.append
+        tainted = set(server._TAINTED)
         server._TAINTED.clear()
+        env = mock.patch.dict(os.environ)
+        env.start()
         os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
         os.environ.pop("PROTON_ALLOWED_SENDERS", None)
         req = {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -531,6 +534,9 @@ class Audit(unittest.TestCase):
         finally:
             for k, v in saved.items():
                 setattr(server, k, v)
+            env.stop()
+            server._TAINTED.clear()
+            server._TAINTED.update(tainted)
         self.assertEqual(len(sent), 1, out.getvalue())
         recs = self._read() if os.path.exists(server.AUDIT_LOG) else []
         self.assertEqual(len(recs), 1, "the send left no audit record")
