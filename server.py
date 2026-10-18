@@ -1240,7 +1240,8 @@ def _do_reply(args, reply_all):
     if mid and mid not in refs:
         refs.append(mid)
     files = _load_attachments(args)
-    text = body + (_quoted(raw) if args.get("quote", True) else "")
+    quoted = _quoted(raw) if args.get("quote", True) else ""
+    text = body + quoted
     reply = _new_message(to, cc, args.get("subject") or _reply_subject(msg), text,
                          in_reply_to=mid or None,
                          references=" ".join(refs[-20:]) or None,
@@ -1249,6 +1250,7 @@ def _do_reply(args, reply_all):
     note = ("\n  (alias mail, sent from %s so the alias stays masked)" % from_address
             if aliased and from_address else "")
     if args.get("dry_run"):
+        _taint_text(quoted)  # the preview shows the inbound body to the model
         return _dry("%s uid %s" % ("save a draft reply to" if as_draft
                                    else "send this reply to", uid),
                     _preview(reply, files=files) + ([note.strip()] if note else []))
@@ -1348,6 +1350,8 @@ def tool_update_draft(args):
                        references=old.get("References"),
                        from_address=from_address, attachments=files)
     if args.get("dry_run"):
+        if args.get("body") is None:
+            _taint_text(body)  # any folder may be named, so this may be inbound mail
         return _dry("replace draft uid %s" % uid, _preview(new, files=files))
 
     conn = imap_connect()
