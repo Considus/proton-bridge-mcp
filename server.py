@@ -750,18 +750,25 @@ def _message_locations(conn, mids, exclude=None):
 def _selected_holds(conn, mid):
     """Whether the selected mailbox holds a message with exactly this
     Message-ID (SEARCH matches substrings, so each hit is confirmed)."""
+    return _selected_uid(conn, mid) is not None
+
+
+def _selected_uid(conn, mid):
+    """The first uid in the selected mailbox whose Message-ID is exactly this
+    one, or None. SEARCH matches substrings, so each hit is confirmed."""
     typ, data = conn.uid("SEARCH", None, "HEADER", "MESSAGE-ID",
                          _imap_quote(mid, "message-id"))
     if typ != "OK" or not data or not data[0]:
-        return False
+        return None
     for u in data[0].split():
+        u = u.decode()
         typ, md = conn.uid("FETCH", u,
                            "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
         if typ != "OK" or not md or md[0] is None:
             continue
         if _parse_envelope(md[0][1])["message_id"] == mid:
-            return True
-    return False
+            return u
+    return None
 
 
 # ----------------------------------------------------------------------------
@@ -1714,7 +1721,8 @@ def _label_index(conn, label_mailbox):
 def _label_copy_uid(conn, label_mailbox, message_id):
     """The uid of this message's copy inside a label mailbox, or None if the
     label isn't on it. SEARCH is tried first, then a local header scan, because
-    Bridge's SEARCH is not something to rely on."""
+    Bridge's SEARCH is not something to rely on. Either way the Message-ID must
+    match exactly: the sender wrote it, and SEARCH matches substrings."""
     if not message_id:
         raise ToolError(
             "That message has no Message-ID, so its copy inside '%s' cannot be "
@@ -1723,10 +1731,9 @@ def _label_copy_uid(conn, label_mailbox, message_id):
     if typ != "OK":
         raise ToolError("Cannot open label mailbox '%s'." % label_mailbox)
     try:
-        typ, data = conn.uid("SEARCH", None, "HEADER", "Message-ID",
-                             _imap_quote(message_id, "message-id"))
-        if typ == "OK" and data and data[0]:
-            return data[0].split()[0].decode()
+        hit = _selected_uid(conn, message_id)
+        if hit is not None:
+            return hit
     except imaplib.IMAP4.error:
         pass
     for u, m in _scan_headers(conn):
