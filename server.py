@@ -1890,16 +1890,25 @@ def _smtp_send(msg):
     except OSError as e:
         raise ToolError("Cannot reach the SMTP server at %s:%s (%s)."
                         % (SMTP_HOST, SMTP_PORT, e))
-    with server as s:
-        s.ehlo()
+    try:
+        server.ehlo()
         if mode != "ssl":
             try:
-                s.starttls(context=ctx)
+                server.starttls(context=ctx)
             except ssl.SSLError as e:
                 raise ToolError(_tls_help(SMTP_HOST, SMTP_PORT, mode, e))
-            s.ehlo()
-        s.login(smtp_user, smtp_pw)
-        s.send_message(msg)
+            server.ehlo()
+        server.login(smtp_user, smtp_pw)
+        server.send_message(msg)
+    except BaseException:
+        server.close()
+        raise
+    # The server has accepted the message, so it is sent. A failed QUIT must
+    # not report it as an error, or a retry would send it a second time.
+    try:
+        server.quit()
+    except Exception:
+        server.close()
 
 
 def tool_send(args):

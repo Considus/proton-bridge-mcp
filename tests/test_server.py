@@ -945,6 +945,102 @@ class SendDraftEnvelope(unittest.TestCase):
                                       ["owner@example.test", "friend@example.test"])])
 
 
+class SendQuitAfterCommit(unittest.TestCase):
+    """Once the server has accepted DATA the message is sent. A bad reply to
+    the QUIT that follows must not turn that into an error, or a retry sends
+    the same mail a second time."""
+
+    def setUp(self):
+        import smtplib
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(server, k) for k in (
+            "USER", "ALIAS_FROM", "STATE_FILE", "AUDIT_LOG", "AUDIT_ENABLED",
+            "ATTACH_DIR", "smtp_credentials", "_tls_context", "_security_mode")}
+        self._smtp = smtplib.SMTP
+        server.USER, server.ALIAS_FROM = "owner@example.test", ""
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.AUDIT_ENABLED = True
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        server.smtp_credentials = lambda: ("owner@example.test", "x")
+        server._tls_context = lambda host: None
+        server._security_mode = lambda var, port: "starttls"
+        os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+        server._TAINTED.clear()
+
+        self.commits = []
+        self.quit_reply = (221, b"bye")
+        self.login_error = None
+        test = self
+
+        class FakeSMTP(smtplib.SMTP):
+            """Never connects. QUIT goes through the real docmd, getreply
+            and __exit__ or quit, answered with test.quit_reply."""
+            def __init__(self, *a, **k):
+                super(FakeSMTP, self).__init__()
+            def ehlo(self, name=""):
+                self.ehlo_resp = b"ok"
+                return 250, b"ok"
+            def starttls(self, **k):
+                return 220, b"ok"
+            def login(self, user, password, **k):
+                if test.login_error:
+                    raise test.login_error
+                return 235, b"ok"
+            def sendmail(self, from_addr, to_addrs, msg, *a, **k):
+                test.commits.append(list(to_addrs))
+                return {}
+            def send(self, s):
+                pass
+            def getreply(self):
+                return test.quit_reply
+
+        smtplib.SMTP = FakeSMTP
+
+    def tearDown(self):
+        import smtplib
+        smtplib.SMTP = self._smtp
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+        server._TAINTED.clear()
+
+    def _call(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "send", "arguments": {
+                               "to": "good@a.example.test", "subject": "dummy",
+                               "body": "dummy body", "confirmed": True}}})
+        res = json.loads(out.getvalue())["result"]
+        with open(server.AUDIT_LOG) as f:
+            outcomes = [json.loads(l)["outcome"] for l in f if l.strip()]
+        return res, outcomes
+
+    def test_clean_quit_reports_sent(self):
+        res, outcomes = self._call()
+        self.assertFalse(res.get("isError"), res)
+        self.assertTrue(res["content"][0]["text"].startswith("Sent "), res)
+        self.assertEqual(outcomes, ["ok"])
+        self.assertEqual(self.commits, [["good@a.example.test"]])
+
+    def test_bad_quit_reply_after_commit_still_reports_sent(self):
+        self.quit_reply = (421, b"closing")
+        res, outcomes = self._call()
+        self.assertFalse(res.get("isError"), res)
+        self.assertTrue(res["content"][0]["text"].startswith("Sent "), res)
+        self.assertEqual(outcomes, ["ok"])
+        self.assertEqual(self.commits, [["good@a.example.test"]])
+
+    def test_failure_before_commit_is_still_an_error(self):
+        import smtplib
+        self.login_error = smtplib.SMTPAuthenticationError(535, b"no")
+        res, outcomes = self._call()
+        self.assertTrue(res.get("isError"), res)
+        self.assertEqual(outcomes, ["error"])
+        self.assertEqual(self.commits, [])
+
+
 class Unsubscribe(unittest.TestCase):
     def _msg(self, unsub, extra=""):
         return email.message_from_string(
