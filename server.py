@@ -2160,9 +2160,17 @@ def allowed_senders():
 
 
 def _check_sender(address):
+    if address is None:
+        return
+    if not isinstance(address, str):
+        raise ToolError("from_address must be one address given as a string.")
     if not address:
         return
-    addr = (email.utils.parseaddr(address)[1] or address).lower()
+    found = [a for _, a in email.utils.getaddresses([address]) if a]
+    if len(found) != 1:
+        raise ToolError("BLOCKED: from_address must be exactly one "
+                        "address, not %r." % address[:80])
+    addr = found[0].lower()
     allowed = allowed_senders()
     if addr not in allowed:
         raise ToolError(
@@ -2179,11 +2187,28 @@ def _allowed_recipients():
     return {x.strip().lower() for x in raw.split(",") if x.strip()}
 
 
+# "undisclosed-recipients:;" and the like: groups with no members, which
+# name nobody, so they count as an empty field.
+_EMPTY_GROUPS_RE = re.compile(r'(?:[^:;<>@,"]*:\s*;(?:\s*,)?)+\s*')
+
+
 def _check_recipients(*fields):
     """Refuse any recipient known only from untrusted content. No override."""
     allow = _allowed_recipients()
     for field in fields:
-        for _, addr in email.utils.getaddresses([field or ""]):
+        if field is None:
+            field = ""
+        # The message is built from this same value, so anything that is not
+        # a string of addresses this parser can read is refused, never skipped.
+        if not isinstance(field, str):
+            raise ToolError("Recipients must be given as a string of "
+                            "addresses, not a list or other value.")
+        parsed = email.utils.getaddresses([field])
+        if (field.strip() and not any(a for _, a in parsed)
+                and not _EMPTY_GROUPS_RE.fullmatch(field)):
+            raise ToolError("Could not read any address in the recipient "
+                            "field %r, so it is refused." % field[:80])
+        for _, addr in parsed:
             a = (addr or "").lower()
             if not a or a in _CORRESPONDENTS or a in allow:
                 continue
@@ -3899,6 +3924,7 @@ def _annotations(name):
 
 
 HANDLERS = {t["name"]: t["handler"] for t in TOOLS}
+SCHEMAS = {t["name"]: t["inputSchema"] for t in TOOLS}
 TOOL_DEFS = [{"name": t["name"],
               "title": TITLES[t["name"]],
               "description": t["description"],
@@ -3921,6 +3947,41 @@ def _result(id_, result):
 
 def _error(id_, code, message):
     _send({"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}})
+
+
+# The address fields reach the recipient and sender checks, so they must be
+# strings. Booleans gate sending, so "false" must not count as true. Every
+# other argument keeps the forms the handlers already accept on purpose.
+_ADDRESS_ARGS = ("to", "cc", "from_address")
+
+
+def _check_arg_types(name, args):
+    """Refuse a boolean that is not a JSON boolean and an address field that
+    is not a string, and convert a number given for a string (uid: 12) or a
+    digit string given for an integer (limit: "10"). Returns the arguments to
+    use. A null is treated as not given and undeclared properties are left
+    alone, as before."""
+    if not isinstance(args, dict):
+        raise ToolError("Tool arguments must be a JSON object.")
+    props = SCHEMAS[name].get("properties", {})
+    out = dict(args)
+    for key, value in args.items():
+        kind = props.get(key, {}).get("type")
+        if kind is None or value is None:
+            continue
+        if kind == "boolean" and not isinstance(value, bool):
+            raise ToolError("Argument '%s' must be true or false. Nothing "
+                            "was done." % key)
+        if key in _ADDRESS_ARGS and not isinstance(value, str):
+            raise ToolError("Argument '%s' must be a string of addresses. "
+                            "Nothing was done." % key)
+        if (kind == "string" and isinstance(value, int)
+                and not isinstance(value, bool)):
+            out[key] = str(value)
+        elif (kind == "integer" and isinstance(value, str)
+              and value.strip().isdigit()):
+            out[key] = int(value)
+    return out
 
 
 def handle(req):
@@ -3956,6 +4017,7 @@ def handle(req):
         # added later cannot forget to log.
         audited = name in _MUTATING
         try:
+            args = _check_arg_types(name, args)
             if audited and not args.get("dry_run"):
                 _rate_check(name)
             out = handler(args)
