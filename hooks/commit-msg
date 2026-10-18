@@ -15,10 +15,10 @@
 # messages are writing, so they follow it. Semicolons are left alone here
 # because commit messages quote code, where they belong.
 #
-# Being local, it protects THIS machine only, and a fresh clone has to be told
-# where the hooks live:
-#
-#     git config core.hooksPath hooks
+# Being local, it protects THIS machine only. Install it once per clone by
+# copying it from origin/main into git's own hooks folder, as AGENTS.md shows
+# (Ship, step 1). Never set core.hooksPath to hooks: git would then run the hook
+# files of whichever branch is checked out, an outsider's PR included.
 #
 # Escape hatches, for the case where the text is genuinely being quoted rather
 # than claimed or written:
