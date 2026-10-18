@@ -39,6 +39,7 @@ Configuration (environment variables):
 
 import base64
 import email
+import email.policy
 import email.utils
 import imaplib
 import json
@@ -1169,11 +1170,51 @@ def _describe(conn, folder, uid):
     return "uid %s  (not found in '%s')" % (uid, folder)
 
 
+def _leaf_parts(part):
+    """Every non-multipart part, with an attached message kept whole."""
+    if part.get_content_maintype() == "multipart":
+        for sub in part.iter_parts():
+            for leaf in _leaf_parts(sub):
+                yield leaf
+    else:
+        yield part
+
+
 def _preview(msg, limit=700, files=None):
+    """What would go out, read back from the bytes that would be sent, so a
+    stored draft or a message with attachments shows its body and every part.
+    A message that cannot be read back is refused rather than shown empty."""
     try:
-        body = msg.get_content()
-    except Exception:
+        full = email.message_from_bytes(msg.as_bytes(),
+                                        policy=email.policy.default)
+        text = full.get_body(preferencelist=("plain", "html"))
         body = ""
+        if text is not None:
+            try:
+                body = text.get_content()
+            except Exception:
+                body = (text.get_payload(decode=True) or b"").decode(
+                    "utf-8", "replace")
+            if text.get_content_subtype() == "html":
+                body = _strip_html(body)
+        parts = []
+        paths = [(f["name"], f["path"]) for f in files or []]
+        for part in _leaf_parts(full):
+            if part is text:
+                continue
+            name = part.get_filename()
+            data = part.get_payload(decode=True)
+            if data is None:
+                data = part.as_bytes()
+            src = ""
+            if paths and paths[0][0] == name:
+                src = " from %s" % paths.pop(0)[1]
+            parts.append("%s %s (%s, %d bytes)%s" % (
+                "Attach: " if name else "Part:   ", name or "(unnamed)",
+                part.get_content_type(), len(data), src))
+    except Exception as e:
+        raise ToolError("Could not read this message back to preview it (%s). "
+                        "Nothing was sent." % type(e).__name__)
     if len(body) > limit:
         body = body[:limit] + "\n[... %d more characters ...]" % (len(body) - limit)
     lines = ["From:    %s" % (msg["From"] or ""),
@@ -1181,10 +1222,24 @@ def _preview(msg, limit=700, files=None):
              "Cc:      %s" % (msg["Cc"] or "(none)")]
     lines += ["Bcc:     %s" % v for v in msg.get_all("Bcc", [])]
     lines.append("Subject: %s" % (msg["Subject"] or ""))
-    for att in files or []:
-        lines.append("Attach:  %s (%d bytes) from %s"
-                     % (att["name"], att["size"], att["path"]))
-    return lines + ["", body]
+    return lines + parts + ["", body]
+
+
+def _taint_preview(lines, msg):
+    """A preview that shows a stored body hands its addresses to the model,
+    so mark them as read_message would, except the ones this message is
+    already addressed to and that the checks have passed."""
+    allow = _allowed_recipients()
+    rcpts = [a.lower() for a in _envelope_recipients(msg)]
+    rcpts = [a for a in rcpts if a not in _CORRESPONDENTS and a not in allow]
+    for addr in _find_addresses(lines[-1]):
+        addr = addr.lower()
+        if addr in _CORRESPONDENTS or addr in _TAINTED:
+            continue
+        _TAINTED.add(addr)
+        if any(_is_tainted(a) for a in rcpts):
+            _TAINTED.discard(addr)
+    return lines
 
 
 def _attach_roots():
@@ -1573,7 +1628,8 @@ def tool_send_draft(args):
     _check_recipients(to, cc, bcc)
     if args.get("dry_run"):
         _check_recipients(*_envelope_recipients(msg))
-        return _dry("send draft uid %s" % uid, _preview(msg))
+        return _dry("send draft uid %s" % uid,
+                    _taint_preview(_preview(msg), msg))
     refused = _smtp_send(msg)
     if refused:
         return (_refused_note(refused) + "Draft sent to the other recipients "
@@ -2159,7 +2215,7 @@ def tool_forward(args):
                        subtype="rfc822", filename="original.eml")
     if args.get("dry_run"):
         _check_recipients(*_envelope_recipients(fwd))
-        return _dry("forward uid %s" % uid, _preview(fwd))
+        return _dry("forward uid %s" % uid, _taint_preview(_preview(fwd), fwd))
     refused = _smtp_send(fwd)
     return _refused_note(refused) + "Forwarded uid %s to %s." % (uid, to)
 
