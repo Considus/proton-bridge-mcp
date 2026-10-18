@@ -2084,6 +2084,37 @@ class ImapDeadline(unittest.TestCase):
         self.assertEqual(self.timeouts, [0.5])
         self.assertIsInstance(out.get("error"), server.ToolError)
 
+    def test_login_timeout_is_a_tool_error_and_closes_the_socket(self):
+        closed = []
+
+        class SilentAtLogin:
+            error = imaplib.IMAP4.error
+
+            def __init__(self, *a, **k):
+                pass
+
+            def starttls(self, *a, **k):
+                pass
+
+            def login(self, *a):
+                raise socket.timeout("timed out")
+
+            def shutdown(self):
+                closed.append(True)
+
+        server.IMAP_PORT = 1143
+        with mock.patch.object(server.imaplib, "IMAP4", SilentAtLogin):
+            with self.assertRaises(server.ToolError):
+                server.imap_connect()
+        self.assertEqual(closed, [True])
+
+    def test_unusable_timeout_setting_falls_back_to_default(self):
+        for bad in ("0", "-5", "soon"):
+            with mock.patch.dict(os.environ, {"PROTON_IMAP_TIMEOUT_S": bad}):
+                self.assertEqual(server._imap_timeout(), 60.0, bad)
+        with mock.patch.dict(os.environ, {"PROTON_IMAP_TIMEOUT_S": "12.5"}):
+            self.assertEqual(server._imap_timeout(), 12.5)
+
     def test_silent_before_greeting_starttls(self):
         self._assert_bounded(1143, greeting=False)
 

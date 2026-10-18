@@ -93,7 +93,18 @@ SMTP_HOST = _cfg("PROTON_SMTP_HOST", "127.0.0.1")
 SMTP_PORT = int(_cfg("PROTON_SMTP_PORT", "1025"))
 # Seconds any one IMAP read or write may wait. The server is one thread, so a
 # peer that goes silent would otherwise hold every later request with it.
-IMAP_TIMEOUT = float(_cfg("PROTON_IMAP_TIMEOUT_S", "60"))
+def _imap_timeout():
+    """Seconds an IMAP read or write may wait. 0 would make the socket
+    non-blocking and a negative or non-numeric value would break every
+    connect, so anything unusable falls back to 60."""
+    try:
+        t = float(_cfg("PROTON_IMAP_TIMEOUT_S", "60"))
+    except (TypeError, ValueError):
+        return 60.0
+    return t if t > 0 else 60.0
+
+
+IMAP_TIMEOUT = _imap_timeout()
 KEYCHAIN_SVC = _cfg("PROTON_KEYCHAIN_SVC", "proton-bridge-imap")
 SMTP_USER = _cfg("PROTON_SMTP_USER") or USER
 SMTP_KEYCHAIN_SVC = _cfg("PROTON_SMTP_KEYCHAIN_SVC", "proton-bridge-smtp")
@@ -425,6 +436,14 @@ def imap_connect():
         raise ToolError("The mail server rejected the login for '%s' (%s). For "
                         "Bridge, use the Bridge password rather than your Proton "
                         "account password." % (USER, e))
+    except OSError as e:
+        try:
+            conn.shutdown()
+        except Exception:
+            pass
+        raise ToolError("The IMAP server at %s:%s stopped answering during "
+                        "login (%s). If this is Proton Bridge, check it is "
+                        "running and signed in." % (IMAP_HOST, IMAP_PORT, e))
     return conn
 
 
