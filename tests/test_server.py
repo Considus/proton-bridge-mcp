@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.parse
 from email.message import EmailMessage
@@ -1949,6 +1950,101 @@ class Manifest(unittest.TestCase):
     def test_readme_has_a_privacy_policy_section(self):
         with open(os.path.join(HERE, "README.md"), encoding="utf-8") as f:
             self.assertIn("## Privacy Policy", f.read())
+
+
+try:
+    import pypdf  # noqa: F401
+    HAVE_PYPDF = True
+except ImportError:
+    HAVE_PYPDF = False
+
+
+def build_pdf(depth, fan):
+    """One page. The page draws Form X0 `fan` times, X0 draws X1 `fan` times,
+    and so on, so the leaf text is drawn fan**depth times from a file that
+    grows only linearly. depth=0 is a plain page that says Hello."""
+    objs = {3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"}
+    for i in range(depth):
+        if i == depth - 1:
+            content = b"BT /F1 12 Tf 10 10 Td (A) Tj ET"
+            res = b"<< /Font << /F1 3 0 R >> >>"
+        else:
+            content = (b"/X%d Do\n" % (i + 1)) * fan
+            res = b"<< /Font << /F1 3 0 R >> /XObject << /X%d %d 0 R >> >>" % (i + 1, 5 + i)
+        objs[4 + i] = (b"<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] "
+                       b"/Resources %s /Length %d >>\nstream\n" % (res, len(content))
+                       + content + b"\nendstream")
+    page = b"/X0 Do\n" * fan if depth else b"BT /F1 12 Tf 10 10 Td (Hello) Tj ET"
+    pc = 4 + depth
+    objs[pc] = b"<< /Length %d >>\nstream\n" % len(page) + page + b"\nendstream"
+    objs[pc + 1] = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents %d 0 R "
+                    b"/Resources << /Font << /F1 3 0 R >> /XObject << /X0 4 0 R >> >> >>" % pc)
+    objs[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    objs[2] = b"<< /Type /Pages /Kids [%d 0 R] /Count 1 >>" % (pc + 1)
+    out, offs = bytearray(b"%PDF-1.4\n"), {}
+    for n in sorted(objs):
+        offs[n] = len(out)
+        out += b"%d 0 obj\n" % n + objs[n] + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (max(objs) + 1)
+    for n in range(1, max(objs) + 1):
+        out += b"%010d 00000 n \n" % offs[n]
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (max(objs) + 1, xref)
+    return bytes(out)
+
+
+@unittest.skipUnless(HAVE_PYPDF, "pypdf is not installed")
+class PdfExtraction(unittest.TestCase):
+    """A sender's PDF must not be able to stall the single-threaded server."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (server.imap_connect, server._fetch_raw, server.ATTACH_DIR,
+                       server.STATE_FILE, server.AUDIT_LOG)
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+
+    def tearDown(self):
+        (server.imap_connect, server._fetch_raw, server.ATTACH_DIR,
+         server.STATE_FILE, server.AUDIT_LOG) = self._saved
+
+    def _read(self, pdf):
+        msg = EmailMessage()
+        msg["From"] = "sender@example.test"
+        msg["To"] = "me@example.test"
+        msg["Subject"] = "Invoice"
+        msg.set_content("See attached.")
+        msg.add_attachment(pdf, maintype="application", subtype="pdf",
+                           filename="invoice.pdf")
+        raw = msg.as_bytes()
+
+        class FakeConn:
+            def logout(self):
+                pass
+
+        server.imap_connect = lambda *a, **k: FakeConn()
+        server._fetch_raw = lambda conn, folder, uid: raw
+        return server.tool_read_attachment({"uid": "7"})
+
+    def test_plain_pdf_text_is_still_read(self):
+        self.assertIn("Hello", self._read(build_pdf(0, 0)))
+
+    def test_nested_forms_are_abandoned_within_the_time_limit(self):
+        # About 2 KB, and about 40 s of pypdf work when nothing limits it.
+        old = getattr(server, "PDF_TIMEOUT_S", None)
+        server.PDF_TIMEOUT_S = 2
+        try:
+            start = time.monotonic()
+            out = self._read(build_pdf(6, 10))
+            elapsed = time.monotonic() - start
+        finally:
+            if old is None:
+                del server.PDF_TIMEOUT_S
+            else:
+                server.PDF_TIMEOUT_S = old
+        self.assertLess(elapsed, 10, "read_attachment took %.1f s" % elapsed)
+        self.assertIn("stopped after", out)
 
 
 if __name__ == "__main__":
