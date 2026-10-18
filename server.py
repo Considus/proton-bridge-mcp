@@ -1034,8 +1034,9 @@ def _preview(msg, limit=700, files=None):
         body = body[:limit] + "\n[... %d more characters ...]" % (len(body) - limit)
     lines = ["From:    %s" % (msg["From"] or ""),
              "To:      %s" % (msg["To"] or ""),
-             "Cc:      %s" % (msg["Cc"] or "(none)"),
-             "Subject: %s" % (msg["Subject"] or "")]
+             "Cc:      %s" % (msg["Cc"] or "(none)")]
+    lines += ["Bcc:     %s" % v for v in msg.get_all("Bcc", [])]
+    lines.append("Subject: %s" % (msg["Subject"] or ""))
     for att in files or []:
         lines.append("Attach:  %s (%d bytes) from %s"
                      % (att["name"], att["size"], att["path"]))
@@ -1363,11 +1364,25 @@ def tool_send_draft(args):
         except Exception:
             pass
     msg = email.message_from_bytes(raw)
+    # smtplib builds the envelope from Bcc and Sender as well as To, Cc and
+    # From, and from Resent-* instead when they are present.
+    resent = sorted({h for h in msg.keys() if h.lower().startswith("resent-")})
+    if resent:
+        raise ToolError("Refusing to send draft uid %s: it carries %s, which "
+                        "would change who receives it. Nothing was sent."
+                        % (uid, ", ".join(resent)))
     to, cc = _decode(msg.get("To")), _decode(msg.get("Cc"))
+    bcc = ", ".join(_decode(v) for v in msg.get_all("Bcc", []))
     if not to:
         raise ToolError("That draft has no recipient.")
     _check_sender(email.utils.parseaddr(msg.get("From") or "")[1])
-    _check_recipients(to, cc)
+    for value in msg.get_all("Sender", []):
+        sender = email.utils.parseaddr(value)[1]
+        if not sender:
+            raise ToolError("Refusing to send draft uid %s: its Sender header "
+                            "has no address. Nothing was sent." % uid)
+        _check_sender(sender)
+    _check_recipients(to, cc, bcc)
     if args.get("dry_run"):
         return _dry("send draft uid %s" % uid, _preview(msg))
     _smtp_send(msg)
