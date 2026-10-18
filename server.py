@@ -2160,9 +2160,17 @@ def allowed_senders():
 
 
 def _check_sender(address):
+    if address is None:
+        return
+    if not isinstance(address, str):
+        raise ToolError("from_address must be one address given as a string.")
     if not address:
         return
-    addr = (email.utils.parseaddr(address)[1] or address).lower()
+    found = [a for _, a in email.utils.getaddresses([address]) if a]
+    if len(found) != 1:
+        raise ToolError("BLOCKED: from_address must be exactly one "
+                        "address, not %r." % address[:80])
+    addr = found[0].lower()
     allowed = allowed_senders()
     if addr not in allowed:
         raise ToolError(
@@ -2183,7 +2191,18 @@ def _check_recipients(*fields):
     """Refuse any recipient known only from untrusted content. No override."""
     allow = _allowed_recipients()
     for field in fields:
-        for _, addr in email.utils.getaddresses([field or ""]):
+        if field is None:
+            field = ""
+        # The message is built from this same value, so anything that is not
+        # a string of addresses this parser can read is refused, never skipped.
+        if not isinstance(field, str):
+            raise ToolError("Recipients must be given as a string of "
+                            "addresses, not a list or other value.")
+        parsed = email.utils.getaddresses([field])
+        if field.strip() and not any(a for _, a in parsed):
+            raise ToolError("Could not read any address in the recipient "
+                            "field %r, so it is refused." % field[:80])
+        for _, addr in parsed:
             a = (addr or "").lower()
             if not a or a in _CORRESPONDENTS or a in allow:
                 continue
@@ -3899,6 +3918,7 @@ def _annotations(name):
 
 
 HANDLERS = {t["name"]: t["handler"] for t in TOOLS}
+SCHEMAS = {t["name"]: t["inputSchema"] for t in TOOLS}
 TOOL_DEFS = [{"name": t["name"],
               "title": TITLES[t["name"]],
               "description": t["description"],
@@ -3921,6 +3941,39 @@ def _result(id_, result):
 
 def _error(id_, code, message):
     _send({"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}})
+
+
+_JSON_TYPES = {"string": str, "boolean": bool, "array": list, "object": dict}
+
+
+def _is_type(value, kind):
+    if kind == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, _JSON_TYPES[kind])
+
+
+def _check_arg_types(name, args):
+    """Refuse an argument whose JSON type is not the one the tool declares,
+    so a handler never acts on a value its checks did not expect. A null is
+    treated as not given, and properties the tool does not declare are left
+    alone, both as before."""
+    if not isinstance(args, dict):
+        raise ToolError("Tool arguments must be a JSON object.")
+    props = SCHEMAS[name].get("properties", {})
+    for key, value in args.items():
+        spec = props.get(key)
+        if spec is None or value is None:
+            continue
+        kind = spec["type"]
+        ok = _is_type(value, kind)
+        if ok and kind == "array" and "items" in spec:
+            ok = all(_is_type(v, spec["items"]["type"]) for v in value)
+        if not ok:
+            want = kind
+            if kind == "array" and "items" in spec:
+                want = "array of %s" % spec["items"]["type"]
+            raise ToolError("Argument '%s' must be of type %s. Nothing was "
+                            "done." % (key, want))
 
 
 def handle(req):
@@ -3956,6 +4009,7 @@ def handle(req):
         # added later cannot forget to log.
         audited = name in _MUTATING
         try:
+            _check_arg_types(name, args)
             if audited and not args.get("dry_run"):
                 _rate_check(name)
             out = handler(args)
