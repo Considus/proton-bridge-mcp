@@ -2137,6 +2137,9 @@ def _pdf_text(data, limit=20000):
     except subprocess.TimeoutExpired:  # run() has already killed the child
         return ("[PDF text extraction stopped after %g s: the file is too complex. "
                 "Use save_attachment and open the file instead.]" % PDF_TIMEOUT_S)
+    except OSError:  # the child could not be started at all
+        return ("[PDF text extraction unavailable: could not start a Python process. "
+                "Use save_attachment and open the file instead.]")
     out = p.stdout.decode("utf-8", "replace")
     if p.returncode == 3:
         return ("[PDF text extraction unavailable — server is not running under "

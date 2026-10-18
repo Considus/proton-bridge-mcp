@@ -1993,6 +1993,21 @@ def build_pdf(depth, fan):
     return bytes(out)
 
 
+class PdfWorkerStart(unittest.TestCase):
+    """If the extraction process cannot start, read_attachment still answers."""
+
+    def test_a_failed_start_returns_a_note(self):
+        def refuse(*a, **k):
+            raise OSError(11, "Resource temporarily unavailable")
+        saved = server.subprocess.run
+        server.subprocess.run = refuse
+        try:
+            out = server._pdf_text(b"%PDF-1.4")
+        finally:
+            server.subprocess.run = saved
+        self.assertIn("Use save_attachment", out)
+
+
 @unittest.skipUnless(HAVE_PYPDF, "pypdf is not installed")
 class PdfExtraction(unittest.TestCase):
     """A sender's PDF must not be able to stall the single-threaded server."""
