@@ -756,10 +756,16 @@ def _selected_holds(conn, mid):
 def _selected_uid(conn, mid):
     """The first uid in the selected mailbox whose Message-ID is exactly this
     one, or None. SEARCH matches substrings, so each hit is confirmed."""
+    return next(_selected_uids(conn, mid), None)
+
+
+def _selected_uids(conn, mid):
+    """Yield each uid in the selected mailbox whose Message-ID is exactly this
+    one, lazily, so a caller wanting only the first stops fetching there."""
     typ, data = conn.uid("SEARCH", None, "HEADER", "MESSAGE-ID",
                          _imap_quote(mid, "message-id"))
     if typ != "OK" or not data or not data[0]:
-        return None
+        return
     for u in data[0].split():
         u = u.decode()
         typ, md = conn.uid("FETCH", u,
@@ -767,8 +773,7 @@ def _selected_uid(conn, mid):
         if typ != "OK" or not md or md[0] is None:
             continue
         if _parse_envelope(md[0][1])["message_id"] == mid:
-            return u
-    return None
+            yield u
 
 
 # ----------------------------------------------------------------------------
@@ -1746,15 +1751,17 @@ def _message_id_of(conn, uid, folder):
 
 def _label_index(conn, label_mailbox):
     """-> {message_id: uid} for a label mailbox, scanned once. UIDs survive an
-    expunge (only sequence numbers shift), so one pass is safe for a batch."""
+    expunge (only sequence numbers shift), so one pass is safe for a batch.
+    A Message-ID carried by more than one message maps to None: the sender
+    writes it, so which copy belongs to which message cannot be told."""
     typ, _ = conn.select(_folder_quote(label_mailbox), readonly=False)
     if typ != "OK":
         raise ToolError("Cannot open label mailbox '%s'." % label_mailbox)
     index = {}
     for u, m in _scan_headers(conn):
         mid = _hstr(m.get("Message-ID")).strip()
-        if mid and mid not in index:
-            index[mid] = u
+        if mid:
+            index[mid] = None if mid in index else u
     return index
 
 
@@ -1762,7 +1769,8 @@ def _label_copy_uid(conn, label_mailbox, message_id):
     """The uid of this message's copy inside a label mailbox, or None if the
     label isn't on it. SEARCH is tried first, then a local header scan, because
     Bridge's SEARCH is not something to rely on. Either way the Message-ID must
-    match exactly: the sender wrote it, and SEARCH matches substrings."""
+    match exactly: the sender wrote it, and SEARCH matches substrings. Two or
+    more exact matches are refused, since a sender can reuse a Message-ID."""
     if not message_id:
         raise ToolError(
             "That message has no Message-ID, so its copy inside '%s' cannot be "
@@ -1771,15 +1779,18 @@ def _label_copy_uid(conn, label_mailbox, message_id):
     if typ != "OK":
         raise ToolError("Cannot open label mailbox '%s'." % label_mailbox)
     try:
-        hit = _selected_uid(conn, message_id)
-        if hit is not None:
-            return hit
+        hits = list(_selected_uids(conn, message_id))
     except imaplib.IMAP4.error:
-        pass
-    for u, m in _scan_headers(conn):
-        if _hstr(m.get("Message-ID")).strip() == message_id:
-            return u
-    return None
+        hits = []
+    if not hits:
+        hits = [u for u, m in _scan_headers(conn)
+                if _hstr(m.get("Message-ID")).strip() == message_id]
+    if len(hits) > 1:
+        raise ToolError(
+            "%d messages in '%s' share this message's Message-ID, so its copy "
+            "cannot be identified. Nothing was changed." % (len(hits),
+                                                            label_mailbox))
+    return hits[0] if hits else None
 
 
 def _drop_label_copy(conn, copy_uid):
@@ -1885,9 +1896,14 @@ def tool_bulk_remove_label(args):
             if not mid:
                 failed.append("%s (no Message-ID)" % uid)
                 continue
-            copy_uid = index.get(mid)
-            if copy_uid is None:
+            if mid not in index:
                 absent.append(uid)
+                continue
+            copy_uid = index[mid]
+            if copy_uid is None:
+                failed.append("%s (its Message-ID is shared by more than one "
+                              "message in '%s', so its copy cannot be "
+                              "identified; nothing changed)" % (uid, target))
                 continue
             try:
                 _drop_label_copy(conn, copy_uid)
