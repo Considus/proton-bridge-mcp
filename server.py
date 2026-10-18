@@ -680,19 +680,26 @@ def _message_locations(conn, mids, exclude=None):
         if conn.select(_folder_quote(name), readonly=True)[0] != "OK":
             continue
         for mid in wanted:
-            typ, data = conn.uid("SEARCH", None, "HEADER", "MESSAGE-ID",
-                                 _imap_quote(mid, "message-id"))
-            if typ != "OK" or not data or not data[0]:
-                continue
-            for u in data[0].split():
-                typ, md = conn.uid("FETCH", u,
-                                   "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
-                if typ != "OK" or not md or md[0] is None:
-                    continue
-                if _parse_envelope(md[0][1])["message_id"] == mid:
-                    found[mid].append(name)
-                    break
+            if _selected_holds(conn, mid):
+                found[mid].append(name)
     return found
+
+
+def _selected_holds(conn, mid):
+    """Whether the selected mailbox holds a message with exactly this
+    Message-ID (SEARCH matches substrings, so each hit is confirmed)."""
+    typ, data = conn.uid("SEARCH", None, "HEADER", "MESSAGE-ID",
+                         _imap_quote(mid, "message-id"))
+    if typ != "OK" or not data or not data[0]:
+        return False
+    for u in data[0].split():
+        typ, md = conn.uid("FETCH", u,
+                           "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+        if typ != "OK" or not md or md[0] is None:
+            continue
+        if _parse_envelope(md[0][1])["message_id"] == mid:
+            return True
+    return False
 
 
 # ----------------------------------------------------------------------------
@@ -2753,6 +2760,50 @@ def _label_message_count(conn, target):
     return None
 
 
+def _refuse_if_only_copies(conn, target, n):
+    """Refuse unless every message in the label also lives in another mailbox.
+
+    Whether the host is Proton cannot be told from mailbox names: an IMAP sync
+    tool can copy a Labels/ tree onto a plain host, where DELETE takes the
+    messages with it. So check the messages instead. On Proton each one is
+    also in All Mail, which is searched first so the check stops early."""
+    if n == 0:
+        return
+    typ, data = conn.select(_folder_quote(target), readonly=True)
+    try:
+        exists = int(data[0])
+    except Exception:
+        exists = None
+    if typ != "OK" or exists is None:
+        raise ToolError("Could not open '%s' to check its messages, so it was "
+                        "not deleted." % target)
+    rows = _scan_headers(conn) if exists else []
+    mids = [(m.get("Message-ID") or "").strip() for _u, m in rows]
+    if len(mids) < exists or not all(mids):
+        raise ToolError(
+            "Could not confirm that every message in '%s' is kept somewhere "
+            "else (some could not be read or have no Message-ID), so it was "
+            "not deleted. Delete it in your mail client if you want it gone."
+            % target)
+    missing = list(dict.fromkeys(mids))
+    boxes = [(f, b) for f, b in _list_mailboxes(conn)
+             if "noselect" not in f and b != target]
+    boxes.sort(key=lambda fb: not (r"\all" in fb[0] or fb[1] == "All Mail"))
+    for _f, name in boxes:
+        if not missing:
+            break
+        if conn.select(_folder_quote(name), readonly=True)[0] != "OK":
+            continue
+        missing = [mid for mid in missing if not _selected_holds(conn, mid)]
+    if missing:
+        raise ToolError(
+            "%d message(s) in '%s' are not in any other mailbox. On this server "
+            "the label is an ordinary mailbox holding the only copies, and "
+            "deleting it would take them with it, so it is refused. Delete it "
+            "in your mail client if you really do want it gone."
+            % (len(missing), target))
+
+
 def _count_phrase(n):
     return "an unknown number of" if n is None else str(n)
 
@@ -2787,6 +2838,7 @@ def tool_delete_label(args):
     try:
         target = _resolve_label_for_delete(conn, args.get("label"))
         n = _label_message_count(conn, target)
+        _refuse_if_only_copies(conn, target, n)
         if args.get("dry_run"):
             return _dry("delete the label '%s'" % target,
                         ["%s message(s) currently carry it" % _count_phrase(n),
@@ -2818,6 +2870,7 @@ def tool_bulk_delete_labels(args):
                 try:
                     target = _resolve_label_for_delete(conn, label)
                     n = _label_message_count(conn, target)
+                    _refuse_if_only_copies(conn, target, n)
                     lines.append("%s  (%s message(s) carry it)"
                                  % (target, _count_phrase(n)))
                 except ToolError as e:
@@ -2827,6 +2880,7 @@ def tool_bulk_delete_labels(args):
             try:
                 target = _resolve_label_for_delete(conn, label)
                 n = _label_message_count(conn, target)
+                _refuse_if_only_copies(conn, target, n)
                 typ, resp = conn.delete(_folder_quote(target))
                 if typ != "OK":
                     raise ToolError(str(resp))
