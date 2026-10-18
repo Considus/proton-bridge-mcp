@@ -1357,6 +1357,148 @@ class DeleteLabel(unittest.TestCase):
                 {"labels": ["l%d" % i for i in range(server.MAX_BULK + 1)]})
 
 
+class DeleteLabelKeepsMail(unittest.TestCase):
+    """A host that is not Proton can still list a Labels/ tree, for instance one
+    copied across by an IMAP sync tool. There each 'label' is a real mailbox and
+    IMAP DELETE takes its messages with it, so a label is only deleted when
+    every message in it also lives somewhere else."""
+
+    class Host:
+        """A plain IMAP host: DELETE destroys the mailbox and its messages."""
+
+        def __init__(self, boxes):
+            self.boxes = boxes          # {name: [raw header bytes]}
+            self.selected = None
+            self.deleted = []
+
+        def _name(self, quoted):
+            return quoted[1:-1] if quoted.startswith('"') else quoted
+
+        def list(self):
+            return "OK", ['(\\HasNoChildren) "/" "%s"' % b for b in self.boxes]
+
+        def status(self, mailbox, what):
+            n = len(self.boxes.get(self._name(mailbox), []))
+            return "OK", [b'"x" (MESSAGES %d)' % n]
+
+        def select(self, mailbox, readonly=False):
+            name = self._name(mailbox)
+            if name not in self.boxes:
+                return "NO", [b"no such mailbox"]
+            self.selected = name
+            return "OK", [str(len(self.boxes[name])).encode()]
+
+        def uid(self, cmd, *args):
+            msgs = self.boxes[self.selected]
+            cmd = cmd.upper()
+            if cmd == "SEARCH":
+                want = self._name(args[-1])
+                hits = [str(i + 1).encode() for i, raw in enumerate(msgs)
+                        if want.encode() in raw]
+                return "OK", [b" ".join(hits)]
+            if cmd == "FETCH":
+                spec = args[0]
+                out = []
+                for i, raw in enumerate(msgs):
+                    u = str(i + 1)
+                    if spec == "1:*" or spec in (u, u.encode()):
+                        out.append((b"%s (UID %s BODY[] {%d}"
+                                    % (u.encode(), u.encode(), len(raw)), raw))
+                return ("OK", out) if out else ("NO", None)
+            return "NO", None
+
+        def delete(self, mailbox):
+            name = self._name(mailbox)
+            self.deleted.append(name)
+            self.boxes.pop(name, None)
+            return "OK", [b"done"]
+
+        def logout(self):
+            pass
+
+    @staticmethod
+    def _hdr(mid):
+        hdr = "Subject: s\r\nFrom: a@sender.example.test\r\n"
+        if mid:
+            hdr += "Message-ID: %s\r\n" % mid
+        return (hdr + "\r\n").encode()
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (server.imap_connect, server.AUDIT_LOG, server.STATE_FILE)
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+
+    def tearDown(self):
+        server.imap_connect, server.AUDIT_LOG, server.STATE_FILE = self._saved
+
+    def _use(self, boxes):
+        host = self.Host(boxes)
+        server.imap_connect = lambda: host
+        return host
+
+    def _only_copies_host(self):
+        return self._use({
+            "INBOX": [self._hdr("<keep@inbox.example.test>")],
+            "Sent": [], "Trash": [], "Labels": [],
+            "Labels/Clients": [self._hdr("<c%d@mail.example.test>" % i)
+                               for i in range(3)],
+        })
+
+    def test_label_holding_the_only_copies_is_not_deleted(self):
+        host = self._only_copies_host()
+        with self.assertRaises(server.ToolError):
+            server.tool_delete_label({"label": "Clients", "confirmed": True})
+        self.assertEqual(host.deleted, [])
+        self.assertIn("Labels/Clients", host.boxes)
+
+    def test_preview_reports_the_refusal(self):
+        self._only_copies_host()
+        with self.assertRaises(server.ToolError):
+            server.tool_delete_label({"label": "Clients", "dry_run": True})
+
+    def test_bulk_does_not_delete_the_only_copies(self):
+        host = self._only_copies_host()
+        out = server.tool_bulk_delete_labels(
+            {"labels": ["Clients"], "confirmed": True})
+        self.assertEqual(host.deleted, [])
+        self.assertIn("Deleted 0 of 1", out)
+        self.assertIn("failed", out)
+
+    def test_bulk_preview_marks_it_refused(self):
+        self._only_copies_host()
+        out = server.tool_bulk_delete_labels(
+            {"labels": ["Clients"], "dry_run": True})
+        self.assertIn("REFUSED", out)
+
+    def test_message_without_a_message_id_is_refused(self):
+        host = self._use({
+            "INBOX": [self._hdr("<c0@mail.example.test>")], "Labels": [],
+            "Labels/Clients": [self._hdr("<c0@mail.example.test>"),
+                               self._hdr(None)],
+        })
+        with self.assertRaises(server.ToolError):
+            server.tool_delete_label({"label": "Clients", "confirmed": True})
+        self.assertEqual(host.deleted, [])
+
+    def test_label_whose_messages_live_elsewhere_is_deleted(self):
+        mids = ["<c%d@mail.example.test>" % i for i in range(3)]
+        host = self._use({
+            "INBOX": [self._hdr(mids[0])],
+            "All Mail": [self._hdr(m) for m in mids],
+            "Labels": [],
+            "Labels/Clients": [self._hdr(m) for m in mids],
+        })
+        out = server.tool_delete_label({"label": "Clients", "confirmed": True})
+        self.assertEqual(host.deleted, ["Labels/Clients"])
+        self.assertIn("none were deleted", out)
+
+    def test_empty_label_is_deleted(self):
+        host = self._use({"INBOX": [], "Labels": [], "Labels/Old": []})
+        server.tool_bulk_delete_labels({"labels": ["Old"], "confirmed": True})
+        self.assertEqual(host.deleted, ["Labels/Old"])
+
+
 class SpecialFolders(unittest.TestCase):
     """Not every server advertises RFC 6154 flags, so the name fallback is the
     only thing standing between a send and a missing copy in Sent."""
