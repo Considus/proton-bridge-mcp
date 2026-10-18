@@ -1343,6 +1343,27 @@ def _drafts_folder_of(args, conn):
     return args.get("folder") or _find_drafts_folder(conn)
 
 
+def _bin_to_trash(conn, uid, trash):
+    """Move uid from the selected folder to Trash. Returns False, with the
+    message left where it was, if Trash did not take it. The original is
+    flagged and expunged only after the copy is confirmed."""
+    try:
+        typ, _ = conn.uid("MOVE", uid, _folder_quote(trash))
+    except imaplib.IMAP4.error:
+        typ = "NO"
+    if typ == "OK":
+        return True
+    try:
+        typ, _ = conn.uid("COPY", uid, _folder_quote(trash))
+    except imaplib.IMAP4.error:
+        typ = "NO"
+    if typ != "OK":
+        return False
+    conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
+    conn.expunge()
+    return True
+
+
 def tool_update_draft(args):
     """IMAP has no edit. A draft is replaced by appending the new version and
     binning the old one, so threading headers are carried across by hand."""
@@ -1386,22 +1407,19 @@ def tool_update_draft(args):
             raise ToolError("Could not save the replacement draft: %s" % resp)
         # Only bin the original once the replacement is safely stored.
         _select_checked(conn, folder, None, readonly=False)
-        trash = _special_folder(conn, "trash")
-        try:
-            typ, _ = conn.uid("MOVE", uid, _folder_quote(trash))
-        except imaplib.IMAP4.error:
-            typ = "NO"
-        if typ != "OK":
-            conn.uid("COPY", uid, _folder_quote(trash))
-            conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-            conn.expunge()
+        binned = _bin_to_trash(conn, uid, _special_folder(conn, "trash"))
     finally:
         try:
             conn.logout()
         except Exception:
             pass
-    return ("Draft replaced in '%s'. The previous version is in Trash.\n  To: %s\n"
-            "  Subject: %s" % (folder, to, subject))
+    if binned:
+        where = "The previous version is in Trash."
+    else:
+        where = ("The previous version could not be moved to Trash and is "
+                 "still in '%s' as uid %s." % (folder, uid))
+    return ("Draft replaced in '%s'. %s\n  To: %s\n"
+            "  Subject: %s" % (folder, where, to, subject))
 
 
 def tool_delete_draft(args):
@@ -1477,25 +1495,32 @@ def tool_send_draft(args):
         return _dry("send draft uid %s" % uid, _preview(msg))
     _smtp_send(msg)
 
-    conn = imap_connect()
+    # The message has gone. A cleanup failure from here on must not read as a
+    # failed send, or a retry sends it twice.
+    problem = None
     try:
-        folder = _drafts_folder_of(args, conn)
-        _select_checked(conn, folder, None, readonly=False)
-        trash = _special_folder(conn, "trash")
+        conn = imap_connect()
         try:
-            conn.uid("MOVE", uid, _folder_quote(trash))
-        except imaplib.IMAP4.error:
-            conn.uid("COPY", uid, _folder_quote(trash))
-            conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-            conn.expunge()
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-    return ("Draft sent.\n  From: %s\n  To: %s\n  Subject: %s\n"
-            "The draft has been moved to Trash; Proton keeps its own copy in Sent."
-            % (_decode(msg.get("From")), to, _decode(msg.get("Subject"))))
+            folder = _drafts_folder_of(args, conn)
+            _select_checked(conn, folder, None, readonly=False)
+            if not _bin_to_trash(conn, uid, _special_folder(conn, "trash")):
+                problem = "the server refused it"
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+    except Exception as e:
+        problem = str(e).splitlines()[0] if str(e) else type(e).__name__
+    if problem:
+        note = ("The message WAS SENT, but the draft could not be moved to "
+                "Trash (%s). It is still in '%s' as uid %s. Do not send it "
+                "again; remove it with delete_draft." % (problem, folder, uid))
+    else:
+        note = ("The draft has been moved to Trash; Proton keeps its own copy "
+                "in Sent.")
+    return ("Draft sent.\n  From: %s\n  To: %s\n  Subject: %s\n%s"
+            % (_decode(msg.get("From")), to, _decode(msg.get("Subject")), note))
 
 
 _ANGLE_RE = re.compile(r"<([^>]+)>")
