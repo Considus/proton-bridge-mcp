@@ -10,12 +10,14 @@ classification, the write sandbox, and the anti-exfiltration rules.
 
 import email
 import importlib
+import io
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.parse
 from email.message import EmailMessage
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1241,6 +1243,87 @@ class Config(unittest.TestCase):
                 "actual-secret")
         finally:
             os.environ.pop("PROTON_TEST_PW", None)
+
+
+class SetupUpdateMode(unittest.TestCase):
+    """Re-running setup.py edits only the settings its form shows. Anything the
+    owner added by hand, such as PROTON_MODE, has to survive the save."""
+
+    def setUp(self):
+        import setup
+        self.setup = setup
+        self.tmp = tempfile.mkdtemp()
+        self.settings = os.path.join(self.tmp, "settings.json")
+        self.saved = {n: getattr(setup, n) for n in (
+            "SETTINGS_FILE", "EXISTING", "verify", "store_password", "lookup_password")}
+        setup.SETTINGS_FILE = self.settings
+        setup.verify = lambda *a: 3
+        setup.store_password = lambda user, pw, service=None: "test store"
+        setup.lookup_password = lambda account, service: "stored-secret"
+
+    def tearDown(self):
+        for n, v in self.saved.items():
+            setattr(self.setup, n, v)
+
+    def post(self, fields):
+        body = urllib.parse.urlencode(fields).encode("utf-8")
+        h = self.setup.Handler.__new__(self.setup.Handler)
+        h.path = "/?token=" + self.setup.TOKEN
+        h.headers = {"Host": "127.0.0.1", "Content-Length": str(len(body))}
+        h.rfile, h.wfile = io.BytesIO(body), io.BytesIO()
+        h.request_version, h.requestline, h.command = "HTTP/1.1", "POST / HTTP/1.1", "POST"
+        h.server = type("FakeServer", (), {"shutdown": lambda self: None})()
+        h.do_POST()
+        return h.wfile.getvalue().decode("utf-8")
+
+    def form(self, **changes):
+        f = {"imap_user": "owner@example.test", "imap_pass": "",
+             "imap_host": "127.0.0.1", "imap_port": "1143",
+             "smtp_user": "owner@example.test", "smtp_pass": "",
+             "smtp_host": "127.0.0.1", "smtp_port": "1025",
+             "imap_security": "auto", "smtp_security": "auto", "alias_from": ""}
+        f.update(changes)
+        return f
+
+    def test_update_keeps_settings_the_form_does_not_manage(self):
+        before = {"PROTON_USER": "owner@example.test",
+                  "PROTON_IMAP_HOST": "127.0.0.1", "PROTON_IMAP_PORT": "1143",
+                  "PROTON_SMTP_HOST": "127.0.0.1", "PROTON_SMTP_PORT": "1025",
+                  "PROTON_SMTP_USER": "old-smtp@example.test",
+                  "PROTON_MODE": "organise", "PROTON_READONLY": "",
+                  "PROTON_RATE_SEND_PER_HOUR": "2", "PROTON_MAX_BULK": "7",
+                  "PROTON_AUDIT_LOG": os.path.join(self.tmp, "audit.log")}
+        with open(self.settings, "w") as f:
+            json.dump(before, f)
+        self.setup.EXISTING = self.setup.existing_config()
+        self.assertTrue("Setup complete" in self.post(self.form(imap_port="1144")))
+        with open(self.settings) as f:
+            after = json.load(f)
+        for key in ("PROTON_MODE", "PROTON_READONLY", "PROTON_RATE_SEND_PER_HOUR",
+                    "PROTON_MAX_BULK", "PROTON_AUDIT_LOG"):
+            self.assertEqual(after.get(key), before[key], key)
+        self.assertEqual(after["PROTON_IMAP_PORT"], "1144")
+        # A managed key the form now leaves out is still removed.
+        self.assertNotIn("PROTON_SMTP_USER", after)
+        old, old_env = server.SETTINGS_FILE, os.environ.pop("PROTON_MODE", None)
+        try:
+            server.SETTINGS_FILE = self.settings
+            server._SETTINGS = server._load_settings()
+            self.assertEqual(server._mode(), "organise")
+        finally:
+            server.SETTINGS_FILE = old
+            server._SETTINGS = server._load_settings()
+            if old_env is not None:
+                os.environ["PROTON_MODE"] = old_env
+
+    def test_unreadable_settings_file_is_not_overwritten(self):
+        with open(self.settings, "w") as f:
+            f.write('{"PROTON_MODE": "organise",')
+        self.setup.EXISTING = self.setup.existing_config()
+        page = self.post(self.form())
+        self.assertFalse("Setup complete" in page, "settings.json was overwritten")
+        with open(self.settings) as f:
+            self.assertEqual(f.read(), '{"PROTON_MODE": "organise",')
 
 
 def rpc(requests, env=None):
