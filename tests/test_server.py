@@ -1660,6 +1660,97 @@ class DraftBinning(unittest.TestCase):
         self.assertIn("previous version is in Trash", text)
 
 
+class DraftBinningUidValidity(unittest.TestCase):
+    """update_draft and send_draft fetch the draft on one connection and bin
+    it on a second. If Drafts is resynced in between, the uid names another
+    message, so binning must run under the UIDVALIDITY the draft was fetched
+    under, or not at all."""
+
+    OTHER = (b"From: owner@example.test\r\nTo: someone@example.test\r\n"
+             b"Subject: unrelated draft\r\n\r\nkeep me\r\n")
+    RAW = DraftBinning.RAW
+
+    class FakeConn(DraftBinning.FakeConn):
+        def response(self, name):
+            return name, [self.t.validity.encode()]
+
+    def setUp(self):
+        DraftBinning.setUp(self)
+        self.validity = "100"
+        self.box["Drafts"] = {"1": self.OTHER, "2": self.RAW}
+        self.resync_at = None
+
+        def connect():
+            self.connects += 1
+            if self.connects == self.resync_at:
+                # Bridge resyncs Drafts: new epoch, and uid 2 is now the
+                # unrelated draft.
+                self.validity = "101"
+                self.box["Drafts"] = {"1": self.RAW, "2": self.OTHER}
+            return self.FakeConn(self)
+        server.imap_connect = connect
+
+    tearDown = DraftBinning.tearDown
+    _call = DraftBinning._call
+
+    def test_send_draft_refuses_a_stale_uidvalidity(self):
+        self.resync_at = 1
+        reply, text, outcome = self._call(
+            "send_draft", {"uid": "2", "uidvalidity": "100", "confirmed": True})
+        self.assertTrue(reply.get("isError"), text)
+        self.assertIn("UIDVALIDITY mismatch", text)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.box["Trash"], {})
+
+    def test_send_draft_bins_the_draft_when_nothing_was_resynced(self):
+        reply, text, outcome = self._call(
+            "send_draft", {"uid": "2", "uidvalidity": "100", "confirmed": True})
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(list(self.box["Trash"].values()), [self.RAW])
+        self.assertEqual(list(self.box["Drafts"].values()), [self.OTHER])
+        self.assertIn("has been moved to Trash", text)
+
+    def test_send_draft_resync_before_cleanup_bins_nothing(self):
+        self.resync_at = 2
+        reply, text, outcome = self._call(
+            "send_draft", {"uid": "2", "uidvalidity": "100", "confirmed": True})
+        self.assertEqual(len(self.sent), 1)
+        self.assertFalse(reply.get("isError"), text)
+        self.assertEqual(outcome, ["ok"])
+        self.assertEqual(self.box["Trash"], {},
+                         "binned the wrong draft, log %r" % self.log)
+        self.assertIn(self.OTHER, self.box["Drafts"].values())
+        self.assertIn(self.RAW, self.box["Drafts"].values())
+        self.assertNotIn("has been moved to Trash", text)
+        self.assertIn("WAS SENT", text)
+        self.assertIn("resynced", text)
+
+    def test_update_draft_resync_before_cleanup_bins_nothing(self):
+        self.resync_at = 2
+        reply, text, outcome = self._call(
+            "update_draft", {"uid": "2", "uidvalidity": "100", "body": "new body"})
+        self.assertFalse(reply.get("isError"), text)
+        self.assertEqual(self.box["Trash"], {},
+                         "binned the wrong draft, log %r" % self.log)
+        self.assertIn(self.OTHER, self.box["Drafts"].values())
+        self.assertIn(self.RAW, self.box["Drafts"].values())
+        self.assertEqual(len(self.box["Drafts"]), 3)
+        self.assertIn("Draft replaced", text)
+        self.assertNotIn("previous version is in Trash", text)
+        self.assertIn("resynced", text)
+
+    def test_update_draft_without_uidvalidity_still_binds_the_fetch(self):
+        # The caller may omit uidvalidity; the epoch seen at fetch time is
+        # what the uid belongs to, so a resync must still stop the MOVE.
+        self.resync_at = 2
+        reply, text, outcome = self._call(
+            "update_draft", {"uid": "2", "body": "new body"})
+        self.assertEqual(self.box["Trash"], {},
+                         "binned the wrong draft, log %r" % self.log)
+        self.assertIn(self.OTHER, self.box["Drafts"].values())
+        self.assertNotIn("previous version is in Trash", text)
+
+
 class Unsubscribe(unittest.TestCase):
     def _msg(self, unsub, extra=""):
         return email.message_from_string(

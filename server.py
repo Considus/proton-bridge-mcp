@@ -1409,7 +1409,10 @@ def tool_update_draft(args):
     conn = imap_connect()
     try:
         folder = _drafts_folder_of(args, conn)
-        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
+        # The uid is binned on a later connection, so keep the epoch it was
+        # fetched under.
+        validity = _select_checked(conn, folder, args.get("uidvalidity"))
+        raw = _fetch_raw(conn, folder, uid, validity)
     finally:
         try:
             conn.logout()
@@ -1446,9 +1449,12 @@ def tool_update_draft(args):
         # Only bin the original once the replacement is safely stored. From
         # here on a failure must not read as a failed update, or a retry
         # saves a second copy.
+        resynced = binned = False
         try:
-            _select_checked(conn, folder, None, readonly=False)
-            binned = _bin_to_trash(conn, uid, _special_folder(conn, "trash"))
+            resynced = _select_checked(conn, folder, None,
+                                       readonly=False) != validity
+            if not resynced:
+                binned = _bin_to_trash(conn, uid, _special_folder(conn, "trash"))
         except Exception:
             binned = False
     finally:
@@ -1458,6 +1464,11 @@ def tool_update_draft(args):
             pass
     if binned:
         where = "The previous version is in Trash."
+    elif resynced:
+        where = ("The previous version was not moved to Trash: '%s' was "
+                 "resynced, so uid %s may now be a different message. Find "
+                 "the old version with search_mail and remove it with "
+                 "delete_draft." % (folder, uid))
     else:
         where = ("The previous version could not be moved to Trash and is "
                  "still in '%s' as uid %s." % (folder, uid))
@@ -1508,7 +1519,10 @@ def tool_send_draft(args):
     conn = imap_connect()
     try:
         folder = _drafts_folder_of(args, conn)
-        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
+        # The uid is binned on a later connection, so keep the epoch it was
+        # fetched under.
+        validity = _select_checked(conn, folder, args.get("uidvalidity"))
+        raw = _fetch_raw(conn, folder, uid, validity)
     finally:
         try:
             conn.logout()
@@ -1549,13 +1563,15 @@ def tool_send_draft(args):
 
     # The message has gone. A cleanup failure from here on must not read as a
     # failed send, or a retry sends it twice.
-    problem = None
+    problem, resynced = None, False
     try:
         conn = imap_connect()
         try:
             folder = _drafts_folder_of(args, conn)
-            _select_checked(conn, folder, None, readonly=False)
-            if not _bin_to_trash(conn, uid, _special_folder(conn, "trash")):
+            resynced = _select_checked(conn, folder, None,
+                                       readonly=False) != validity
+            if not resynced and not _bin_to_trash(
+                    conn, uid, _special_folder(conn, "trash")):
                 problem = "the server refused it"
         finally:
             try:
@@ -1564,7 +1580,12 @@ def tool_send_draft(args):
                 pass
     except Exception as e:
         problem = str(e).splitlines()[0] if str(e) else type(e).__name__
-    if problem:
+    if resynced:
+        note = ("The message WAS SENT, but the draft was not moved to Trash: "
+                "'%s' was resynced, so uid %s may now be a different message. "
+                "Do not send it again; find it with search_mail and remove it "
+                "with delete_draft." % (folder, uid))
+    elif problem:
         note = ("The message WAS SENT, but the draft could not be moved to "
                 "Trash (%s). It is still in '%s' as uid %s. Do not send it "
                 "again; remove it with delete_draft." % (problem, folder, uid))
