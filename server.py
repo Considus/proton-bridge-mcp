@@ -2662,10 +2662,17 @@ def tool_poll_mailbox(args):
         state = _read_state()
         cursor = (state.get("cursors") or {}).get(folder)
 
-        if not cursor or str(cursor.get("uidvalidity")) != str(validity):
-            why = ("First poll of '%s'" % folder if not cursor else
-                   "'%s' was resynced, so every remembered uid is meaningless "
+        if not cursor:
+            why = "First poll of '%s'" % folder
+        elif str(cursor.get("uidvalidity")) != str(validity):
+            why = ("'%s' was resynced, so every remembered uid is meaningless "
                    "now" % folder)
+        elif int(cursor.get("last_uid", 0)) > head:
+            why = ("The cursor for '%s' was past the end of the mailbox, "
+                   "which no poll sets, so it was reset" % folder)
+        else:
+            why = None
+        if why:
             state.setdefault("cursors", {})[folder] = {
                 "uidvalidity": validity, "last_uid": head}
             _write_state(state)
@@ -2700,6 +2707,10 @@ def tool_poll_mailbox(args):
             _write_state(state)
             tail = "Cursor advanced to uid %d." % batch[-1]
         else:
+            # Remember the furthest checkpoint issued, so ack_folder can
+            # refuse a uid no poll reported.
+            cursor["issued"] = max(int(cursor.get("issued", 0)), batch[-1])
+            _write_state(state)
             tail = ("Cursor NOT moved. Call ack_folder with checkpoint '%s' "
                     "once these are handled; until then another poll returns "
                     "the same batch." % checkpoint)
@@ -2733,8 +2744,13 @@ def tool_ack_mailbox(args):
     if int(cursor.get("last_uid", 0)) >= int(uid):
         return ("Already at uid %s or beyond for '%s'. Nothing to do."
                 % (uid, folder))
-    state.setdefault("cursors", {})[folder] = {"uidvalidity": validity,
-                                               "last_uid": int(uid)}
+    if cursor and int(uid) > int(cursor.get("issued", 0)):
+        raise ToolError(
+            "poll_folder has not reported uid %s for '%s', so that checkpoint "
+            "was not issued by it. Nothing was changed. Call poll_folder with "
+            "advance=false and ack the checkpoint it reports." % (uid, folder))
+    cursor = dict(cursor, uidvalidity=validity, last_uid=int(uid))
+    state.setdefault("cursors", {})[folder] = cursor
     _write_state(state)
     return "Cursor for '%s' committed at uid %s." % (folder, uid)
 
