@@ -1146,6 +1146,88 @@ class PollingCursor(unittest.TestCase):
             oct(os.stat(server.STATE_FILE).st_mode & 0o777), "0o600")
 
 
+class AckOnlyIssuedCheckpoints(unittest.TestCase):
+    """ack_folder commits a checkpoint poll_folder issued, never one made up.
+    An instruction planted in mail could otherwise ack a huge uid and stop
+    poll_folder reporting anything new in that folder."""
+
+    class Mailbox:
+        def __init__(self, validity, uids):
+            self.validity = validity
+            self.uids = list(uids)
+
+        def select(self, mailbox, readonly=False):
+            return "OK", [str(len(self.uids)).encode()]
+
+        def response(self, code):
+            return code, [self.validity.encode()]
+
+        def status(self, mailbox, what):
+            nxt = (max(self.uids) if self.uids else 0) + 1
+            return "OK", [b'"INBOX" (UIDNEXT %d)' % nxt]
+
+        def uid(self, cmd, *args):
+            cmd = cmd.upper()
+            if cmd == "SEARCH":
+                low = int(args[-1].split(":")[0])
+                hits = [str(u).encode() for u in self.uids if u >= low]
+                return "OK", [b" ".join(hits)]
+            if cmd == "FETCH":
+                hdr = (b"From: a@sender.example.test\r\nSubject: uid %s\r\n"
+                       b"Date: Mon, 1 Jan 2024 00:00:00 +0000\r\n\r\n"
+                       % args[0].encode())
+                return "OK", [(b"1 (UID %s BODY[] {1}" % args[0].encode(), hdr)]
+            return "NO", None
+
+        def logout(self):
+            pass
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (server.imap_connect, server.STATE_FILE)
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        self.box = self.Mailbox("555", range(1, 21))
+        server.imap_connect = lambda: self.box
+
+    def tearDown(self):
+        server.imap_connect, server.STATE_FILE = self._saved
+
+    def poll(self, advance=True):
+        return server.tool_poll_mailbox({"folder": "INBOX", "advance": advance})
+
+    def ack(self, checkpoint):
+        return server.tool_ack_mailbox({"folder": "INBOX",
+                                        "checkpoint": checkpoint})
+
+    def test_inflated_ack_is_refused_and_new_mail_still_shows(self):
+        self.poll()
+        self.box.uids += [21, 22]
+        self.assertIn("'555:22'", self.poll(advance=False))
+        with self.assertRaises(server.ToolError):
+            self.ack("555:4294967295")
+        self.assertIn("committed at uid 22", self.ack("555:22"))
+        self.assertIn("Nothing to do", self.ack("555:22"))
+        self.box.uids += [23, 24, 25]
+        self.assertIn("3 new message(s)", self.poll())
+
+    def test_ack_beyond_the_issued_checkpoint_is_refused(self):
+        self.poll()
+        self.box.uids += [21, 22]
+        self.poll(advance=False)
+        self.box.uids.append(23)
+        with self.assertRaises(server.ToolError):
+            self.ack("555:23")
+        self.assertIn("committed at uid 21", self.ack("555:21"))
+        self.assertIn("committed at uid 22", self.ack("555:22"))
+        self.assertIn("1 new message(s)", self.poll())
+
+    def test_inflated_ack_before_any_poll_does_not_hide_later_mail(self):
+        self.ack("555:4294967295")
+        self.assertNotIn("Nothing new", self.poll())
+        self.box.uids += [21, 22, 23]
+        self.assertIn("3 new message(s)", self.poll())
+
+
 class LabelResolution(unittest.TestCase):
     """A label is namespaced under Labels/ on Proton and is an ordinary mailbox
     everywhere else. Detect which, rather than assuming Proton."""
