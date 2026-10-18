@@ -330,6 +330,82 @@ class UidValidity(unittest.TestCase):
             server._select_checked(Bad("1"), "Nope", None)
 
 
+class AttachmentToolsCheckUidValidity(unittest.TestCase):
+    """The attachment tools take a uidvalidity and promise to refuse a stale
+    one. After a resync the same uid names another message, so the check has
+    to run before that message's attachments are listed, read or saved."""
+
+    class Resynced:
+        """INBOX now reports UIDVALIDITY 222, and uid 7 is a different
+        message from the one the caller noted under 111."""
+        def __init__(self):
+            msg = EmailMessage()
+            msg["From"] = "stranger@example.test"
+            msg["To"] = "me@example.test"
+            msg["Subject"] = "Not the one you meant"
+            msg.set_content("body")
+            msg.add_attachment(b"substituted bytes", maintype="text",
+                               subtype="plain", filename="notes.txt")
+            self.raw = msg.as_bytes()
+        def select(self, mailbox, readonly=False):
+            return "OK", [b"1"]
+        def response(self, name):
+            return name, [b"222"]
+        def uid(self, cmd, *args):
+            if cmd.upper() == "FETCH" and args[0] == "7":
+                return "OK", [(b"1 (UID 7 BODY[] {%d}" % len(self.raw), self.raw),
+                              b")"]
+            return "OK", [None]
+        def logout(self):
+            pass
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect)
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+        server.imap_connect = lambda: self.Resynced()
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect) = self._saved
+
+    def _refused(self, tool, **extra):
+        args = dict({"uid": "7", "folder": "INBOX", "uidvalidity": "111"}, **extra)
+        with self.assertRaises(server.ToolError) as cm:
+            tool(args)
+        self.assertIn("UIDVALIDITY mismatch", str(cm.exception))
+
+    def _saved_files(self):
+        out = []
+        for d, _, files in os.walk(server.ATTACH_DIR):
+            out += [os.path.join(d, f) for f in files]
+        return out
+
+    def test_list_attachments_refuses_a_stale_uidvalidity(self):
+        self._refused(server.tool_list_attachments)
+
+    def test_read_attachment_refuses_a_stale_uidvalidity(self):
+        self._refused(server.tool_read_attachment)
+
+    def test_save_attachment_refuses_and_writes_nothing(self):
+        self._refused(server.tool_save_attachment)
+        self._refused(server.tool_save_attachment, persist=True)
+        self.assertEqual(self._saved_files(), [])
+
+    def test_view_attachment_already_refused(self):
+        self._refused(server.tool_view_attachment)
+
+    def test_the_current_uidvalidity_still_works(self):
+        args = {"uid": "7", "folder": "INBOX", "uidvalidity": "222"}
+        self.assertIn("notes.txt", server.tool_list_attachments(dict(args)))
+        self.assertIn("substituted bytes", server.tool_read_attachment(dict(args)))
+        server.tool_save_attachment(dict(args))
+        self.assertEqual(len(self._saved_files()), 1)
+
+
 class FolderListing(unittest.TestCase):
     """The hierarchy delimiter in a LIST response is whatever the server says.
 
@@ -3721,7 +3797,7 @@ class SaveAttachmentNoOverwrite(unittest.TestCase):
                 pass
 
         server.imap_connect = lambda *a, **k: FakeConn()
-        server._fetch_raw = lambda conn, folder, uid: self.mail[(folder, uid)]
+        server._fetch_raw = lambda conn, folder, uid, *_: self.mail[(folder, uid)]
 
     def tearDown(self):
         (server.imap_connect, server._fetch_raw, server.ATTACH_DIR,
