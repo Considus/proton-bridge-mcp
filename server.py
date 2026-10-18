@@ -4154,7 +4154,10 @@ def handle(req):
         except Exception as e:
             if audited:
                 _audit(name, args, "error", str(e))
-            if isinstance(e, (TimeoutError, imaplib.socket.timeout)):
+            # Sending tools also talk SMTP, whose timeout this setting does
+            # not govern, so they keep the plain error.
+            if (name not in _SEND_TOOLS
+                    and isinstance(e, (TimeoutError, imaplib.socket.timeout))):
                 text = ("The mail server stopped answering, so %s timed out. "
                         "If IMAP is just slow on a large mailbox, raise "
                         "PROTON_IMAP_TIMEOUT_S (now %g seconds)."

@@ -2128,6 +2128,19 @@ class ImapDeadline(unittest.TestCase):
         self.assertTrue(res.get("isError"))
         self.assertIn("PROTON_IMAP_TIMEOUT_S", res["content"][0]["text"])
 
+    def test_timeout_in_a_sending_tool_does_not_blame_imap(self):
+        def stalls(args):
+            raise imaplib.socket.timeout("timed out")
+
+        out = io.StringIO()
+        with mock.patch.dict(server.HANDLERS, {"send": stalls}), \
+                mock.patch("sys.stdout", out):
+            server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "send", "arguments": {
+                               "to": "a@example.test", "dry_run": True}}})
+        text = json.loads(out.getvalue())["result"]["content"][0]["text"]
+        self.assertNotIn("PROTON_IMAP_TIMEOUT_S", text)
+
     def test_silent_before_greeting_starttls(self):
         self._assert_bounded(1143, greeting=False)
 
