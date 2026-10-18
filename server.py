@@ -1405,9 +1405,14 @@ def tool_update_draft(args):
                                 new.as_bytes())
         if typ != "OK":
             raise ToolError("Could not save the replacement draft: %s" % resp)
-        # Only bin the original once the replacement is safely stored.
-        _select_checked(conn, folder, None, readonly=False)
-        binned = _bin_to_trash(conn, uid, _special_folder(conn, "trash"))
+        # Only bin the original once the replacement is safely stored. From
+        # here on a failure must not read as a failed update, or a retry
+        # saves a second copy.
+        try:
+            _select_checked(conn, folder, None, readonly=False)
+            binned = _bin_to_trash(conn, uid, _special_folder(conn, "trash"))
+        except Exception:
+            binned = False
     finally:
         try:
             conn.logout()

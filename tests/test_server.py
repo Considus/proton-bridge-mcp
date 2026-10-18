@@ -1314,6 +1314,8 @@ class DraftBinning(unittest.TestCase):
             self.t.log.append((cmd, uid, reply))
             if reply == "BAD":
                 raise server.imaplib.IMAP4.error("BAD %s not supported" % cmd)
+            if reply == "DROP":
+                raise OSError("connection reset by peer")
             if reply != "OK":
                 return reply, [b"[OVERQUOTA] Trash is over quota"]
             dest = self.t.box[args[0].strip('"')]
@@ -1433,6 +1435,17 @@ class DraftBinning(unittest.TestCase):
         self.assertEqual(len(self.box["Drafts"]), 2)
         self.assertEqual(self.box["Trash"], {})
         self.assertNotIn("previous version is in Trash", text)
+        self.assertIn("still in 'Drafts'", text)
+
+    def test_update_draft_cleanup_failure_still_reports_the_saved_draft(self):
+        # The replacement is already appended when binning fails, so the call
+        # must say so rather than fail: a retry would save a second copy.
+        self.replies = {"MOVE": "DROP"}
+        reply, text, outcome = self._call(
+            "update_draft", {"uid": "1", "body": "new body"})
+        self.assertFalse(reply.get("isError"), text)
+        self.assertEqual(len(self.box["Drafts"]), 2)
+        self.assertIn("Draft replaced", text)
         self.assertIn("still in 'Drafts'", text)
 
     def test_update_draft_bins_the_original_when_copy_succeeds(self):
