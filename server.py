@@ -38,6 +38,7 @@ Configuration (environment variables):
 """
 
 import base64
+import contextlib
 import email
 import email.policy
 import email.utils
@@ -54,6 +55,11 @@ import sys
 import urllib.parse
 from email.message import EmailMessage
 from email.header import decode_header, make_header
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 # ----------------------------------------------------------------------------
 # Config
@@ -283,8 +289,30 @@ def _audit(tool, args, outcome, detail=""):
 
 
 # ----------------------------------------------------------------------------
-# Persistent state, shared by the rate limiter and the polling cursors
+# Persistent state, shared by the rate limiter, the polling cursors and the
+# addresses refused as recipients
 # ----------------------------------------------------------------------------
+@contextlib.contextmanager
+def _state_lock():
+    """Held across every write of STATE_FILE, so two server processes cannot
+    overwrite each other's saved recipient refusals."""
+    fd = os.open(STATE_FILE + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+") as f:
+        if fcntl:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        else:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            else:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def _read_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -295,6 +323,23 @@ def _read_state():
 
 
 def _write_state(state):
+    """A caller may have read the state before another process saved a
+    refused address. Keep what is on disk now, so no entry is ever lost."""
+    with _state_lock():
+        disk = _read_state()
+        saved = _saved_taint(disk) | _saved_taint(state)
+        if saved:
+            state["tainted"] = sorted(saved)
+        if disk.get("taint_overflow"):
+            state["taint_overflow"] = True
+        _replace_state(state)
+
+
+def _saved_taint(state):
+    return {a for a in state.get("tainted") or [] if isinstance(a, str)}
+
+
+def _replace_state(state):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
@@ -2407,6 +2452,10 @@ _LOCAL_PUNCT = frozenset(".!#$%&'*+/=?^`{|}~-")
 _DOMAIN_RUN = re.compile(r"[\w.-]+")
 _CORRESPONDENTS = set()   # from headers — safe to reply to
 _TAINTED = set()          # from untrusted content — refused as recipients
+# _TAINTED is also saved in STATE_FILE, so a restarted server still refuses
+# it. Hostile mail could fill the saved list, so it is never trimmed: past
+# this many addresses every recipient outside the headers is refused instead.
+TAINT_CAP = 20000
 
 
 def _note_headers(msg):
@@ -2442,22 +2491,35 @@ def _find_addresses(text):
 
 def _taint_text(text):
     """Every address the server hands to the model out of untrusted content."""
+    new = set()
     for addr in _find_addresses(text or ""):
         addr = addr.lower()
-        if addr not in _CORRESPONDENTS:
-            _TAINTED.add(addr)
+        if addr not in _CORRESPONDENTS and addr not in _TAINTED:
+            new.add(addr)
+    if not new:
+        return
+    _TAINTED.update(new)
+    with _state_lock():
+        state = _read_state()
+        saved = _saved_taint(state)
+        room = max(0, TAINT_CAP - len(saved))
+        fresh = sorted(new - saved)
+        if len(fresh) > room:
+            state["taint_overflow"] = True
+        state["tainted"] = sorted(saved) + fresh[:room]
+        _replace_state(state)
 
 
-def _is_tainted(addr):
+def _is_tainted(addr, tainted):
     """True if addr appears inside a tainted match, starting after a
     non-alphanumeric character (or the start) and ending before one (or the
     end). 'attacker@evil.example' is in 'report.attacker@evil.example.thanks'."""
-    if addr in _TAINTED:
+    if addr in tainted:
         return True
     local, _, domain = addr.rpartition("@")
     if not local:
         return False
-    for t in _TAINTED:
+    for t in tainted:
         tl, _, td = t.rpartition("@")
         if (tl.endswith(local) and not tl[:-len(local)][-1:].isalnum()
                 and td.startswith(domain) and not td[len(domain):][:1].isalnum()):
@@ -2511,6 +2573,8 @@ _EMPTY_GROUPS_RE = re.compile(r'(?:[^:;<>@,"]*:\s*;(?:\s*,)?)+\s*')
 def _check_recipients(*fields):
     """Refuse any recipient known only from untrusted content. No override."""
     allow = _allowed_recipients()
+    state = _read_state()
+    tainted = _TAINTED | _saved_taint(state)
     for field in fields:
         if field is None:
             field = ""
@@ -2528,7 +2592,16 @@ def _check_recipients(*fields):
             a = (addr or "").lower()
             if not a or a in _CORRESPONDENTS or a in allow:
                 continue
-            if _is_tainted(a):
+            if state.get("taint_overflow"):
+                raise ToolError(
+                    "BLOCKED: refusing to send to '%s'.\n\n"
+                    "Messages read so far held more than %d addresses, too "
+                    "many to remember one by one, so every recipient that is "
+                    "not in a message header is refused. The user can add it "
+                    "to PROTON_ALLOWED_RECIPIENTS, or delete %s (this also "
+                    "resets polling cursors and rate counters), then restart."
+                    % (a, TAINT_CAP, STATE_FILE))
+            if _is_tainted(a, tainted):
                 raise ToolError(
                     "BLOCKED — refusing to send to '%s'.\n\n"
                     "That address was harvested from untrusted message or "
