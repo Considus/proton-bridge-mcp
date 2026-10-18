@@ -1930,7 +1930,11 @@ def tool_forward(args):
 #
 # Exceptions live in PROTON_ALLOWED_RECIPIENTS, which the model cannot write.
 # ----------------------------------------------------------------------------
-_ADDR_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+# The local part takes every character an address may legally hold, so a
+# match can carry extra text on either side of the real address (a quote or
+# a word before it, a full stop after it). _is_tainted allows for that.
+_LOCAL_PUNCT = frozenset(".!#$%&'*+/=?^`{|}~-")
+_DOMAIN_RUN = re.compile(r"[\w.-]+")
 _CORRESPONDENTS = set()   # from headers — safe to reply to
 _TAINTED = set()          # from untrusted content — refused as recipients
 
@@ -1942,12 +1946,53 @@ def _note_headers(msg):
                 _CORRESPONDENTS.add(addr.lower())
 
 
+def _find_addresses(text):
+    """Every local@domain in text, where domain has a dot inside it. Scans out
+    from each '@' instead of using one regex, which took time growing with
+    the square of a long run of letters or punctuation. Neither scan crosses
+    another '@', so the whole pass is linear in the length of the text."""
+    found, floor = [], 0
+    at = text.find("@")
+    while at != -1:
+        start = at
+        while start > floor:
+            c = text[start - 1]
+            if not (c.isalnum() or c == "_" or c in _LOCAL_PUNCT):
+                break
+            start -= 1
+        m = _DOMAIN_RUN.match(text, at + 1)
+        domain = m.group() if m else ""
+        dot = domain.find(".")
+        if start < at and dot > 0 and len(domain) > dot + 1:
+            found.append(text[start:at + 1] + domain)
+            floor = at + 1 + len(domain)
+        at = text.find("@", at + 1)
+    return found
+
+
 def _taint_text(text):
     """Every address the server hands to the model out of untrusted content."""
-    for addr in _ADDR_RE.findall(text or ""):
+    for addr in _find_addresses(text or ""):
         addr = addr.lower()
         if addr not in _CORRESPONDENTS:
             _TAINTED.add(addr)
+
+
+def _is_tainted(addr):
+    """True if addr appears inside a tainted match, starting after a
+    non-alphanumeric character (or the start) and ending before one (or the
+    end). 'attacker@evil.example' is in 'report.attacker@evil.example.thanks'."""
+    if addr in _TAINTED:
+        return True
+    local, _, domain = addr.rpartition("@")
+    if not local:
+        return False
+    for t in _TAINTED:
+        tl, _, td = t.rpartition("@")
+        if (tl.endswith(local) and not tl[:-len(local)][-1:].isalnum()
+                and td.startswith(domain) and not td[len(domain):][:1].isalnum()):
+            return True
+    return False
 
 
 def allowed_senders():
@@ -1988,7 +2033,7 @@ def _check_recipients(*fields):
             a = (addr or "").lower()
             if not a or a in _CORRESPONDENTS or a in allow:
                 continue
-            if a in _TAINTED:
+            if _is_tainted(a):
                 raise ToolError(
                     "BLOCKED — refusing to send to '%s'.\n\n"
                     "That address was harvested from untrusted message or "
