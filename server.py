@@ -2463,18 +2463,34 @@ def tool_save_attachment(args):
             skipped.append("%s (%d bytes exceeds %d MB cap)"
                            % (a["filename"], a["size"], MAX_ATTACH_BYTES // 1048576))
             continue
-        path = os.path.join(dest, _safe_name(a["filename"], uid))
-        # O_NOFOLLOW: never write through a symlink planted at the target.
+        base = _safe_name(a["filename"], uid)
+        stem, ext = os.path.splitext(base)
+        # O_EXCL: a UID is unique only within one folder, so another message
+        # can map to the same name. Never replace a saved file; take the next
+        # free numbered name instead. O_EXCL also refuses a symlink at the target.
         # 0o600: owner read/write only — never executable, never group/world.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            fd = os.open(path, flags, 0o600)
-        except OSError as e:
-            skipped.append("%s (%s)" % (a["filename"], e))
+        flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                 | getattr(os, "O_NOFOLLOW", 0))
+        fd, err = None, "no free name"
+        for n in range(1, 100):
+            path = os.path.join(dest, base if n == 1 else
+                                "%s (%d)%s" % (stem, n, ext))
+            try:
+                fd = os.open(path, flags, 0o600)
+                break
+            except FileExistsError:
+                continue
+            except OSError as e:
+                err = e
+                break
+        if fd is None:
+            skipped.append("%s (%s)" % (a["filename"], err))
             continue
         with os.fdopen(fd, "wb") as f:
             f.write(a["payload"])
-        saved.append("%s  (%d bytes)" % (path, a["size"]))
+        saved.append("%s  (%d bytes%s)" % (
+            path, a["size"],
+            "" if n == 1 else "; %s was in use, so nothing was replaced" % base))
     out = "Saved %d file(s):\n  %s" % (len(saved), "\n  ".join(saved) or "(none)")
     if skipped:
         out += "\n\nSkipped %d:\n  %s" % (len(skipped), "\n  ".join(skipped))

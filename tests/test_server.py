@@ -2868,5 +2868,70 @@ class HostileHtml(unittest.TestCase):
                          "a left open")
 
 
+class SaveAttachmentNoOverwrite(unittest.TestCase):
+    """A UID is unique only within one folder, so two messages can share a
+    saved name. A later save must never replace a file saved earlier."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (server.imap_connect, server._fetch_raw, server.ATTACH_DIR,
+                       server.STATE_FILE, server.AUDIT_LOG)
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        self.mail = {}
+
+        class FakeConn:
+            def logout(self):
+                pass
+
+        server.imap_connect = lambda *a, **k: FakeConn()
+        server._fetch_raw = lambda conn, folder, uid: self.mail[(folder, uid)]
+
+    def tearDown(self):
+        (server.imap_connect, server._fetch_raw, server.ATTACH_DIR,
+         server.STATE_FILE, server.AUDIT_LOG) = self._saved
+
+    def _put(self, folder, uid, filename, payload):
+        msg = EmailMessage()
+        msg["From"] = "sender@example.test"
+        msg["To"] = "me@example.test"
+        msg["Subject"] = "File"
+        msg.set_content("See attached.")
+        msg.add_attachment(payload, maintype="application", subtype="pdf",
+                           filename=filename)
+        self.mail[(folder, uid)] = msg.as_bytes()
+
+    def _check(self, dest, first_name, second_name, persist):
+        self._put("Archive", "12", first_name, b"%PDF TRUSTED")
+        self._put("Spam", "12", second_name, b"%PDF ATTACKER")
+        args = {"uid": "12", "persist": persist}
+        server.tool_save_attachment(dict(args, folder="Archive"))
+        first = os.path.join(dest, "uid12_" + first_name)
+        with open(first, "rb") as f:
+            self.assertEqual(f.read(), b"%PDF TRUSTED")
+        out = server.tool_save_attachment(dict(args, folder="Spam"))
+        with open(first, "rb") as f:
+            self.assertEqual(f.read(), b"%PDF TRUSTED",
+                             "a different message replaced a saved file")
+        files = sorted(n for n in os.listdir(dest)
+                       if os.path.isfile(os.path.join(dest, n)))
+        self.assertEqual(len(files), 2, files)
+        other = [n for n in files if n != os.path.basename(first)][0]
+        self.assertIn(os.path.join(dest, other), out)
+        with open(os.path.join(dest, other), "rb") as f:
+            self.assertEqual(f.read(), b"%PDF ATTACKER")
+
+    def test_same_uid_in_another_folder_keeps_the_persisted_file(self):
+        self._check(server._persist_dir(), "Contract.pdf", "Contract.pdf", True)
+
+    def test_same_uid_in_another_folder_keeps_the_ephemeral_file(self):
+        self._check(os.path.realpath(server.ATTACH_DIR), "notes.pdf",
+                    "notes.pdf", False)
+
+    def test_a_case_variant_name_does_not_replace_the_file(self):
+        self._check(server._persist_dir(), "Contract.pdf", "CONTRACT.PDF", True)
+
+
 if __name__ == "__main__":
     unittest.main()
