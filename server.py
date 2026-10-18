@@ -91,6 +91,20 @@ IMAP_HOST = _cfg("PROTON_IMAP_HOST", "127.0.0.1")
 IMAP_PORT = int(_cfg("PROTON_IMAP_PORT", "1143"))
 SMTP_HOST = _cfg("PROTON_SMTP_HOST", "127.0.0.1")
 SMTP_PORT = int(_cfg("PROTON_SMTP_PORT", "1025"))
+# Seconds any one IMAP read or write may wait. The server is one thread, so a
+# peer that goes silent would otherwise hold every later request with it.
+def _imap_timeout():
+    """Seconds an IMAP read or write may wait. 0 would make the socket
+    non-blocking, and a negative, infinite or non-numeric value would break
+    every connect, so anything unusable falls back to 60."""
+    try:
+        t = float(_cfg("PROTON_IMAP_TIMEOUT_S", "60"))
+    except (TypeError, ValueError):
+        return 60.0
+    return t if 0 < t < float("inf") else 60.0
+
+
+IMAP_TIMEOUT = _imap_timeout()
 KEYCHAIN_SVC = _cfg("PROTON_KEYCHAIN_SVC", "proton-bridge-imap")
 SMTP_USER = _cfg("PROTON_SMTP_USER") or USER
 SMTP_KEYCHAIN_SVC = _cfg("PROTON_SMTP_KEYCHAIN_SVC", "proton-bridge-smtp")
@@ -404,9 +418,10 @@ def imap_connect():
     ctx = _tls_context(IMAP_HOST)
     try:
         if mode == "ssl":
-            conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=ctx)
+            conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=ctx,
+                                     timeout=IMAP_TIMEOUT)
         else:
-            conn = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+            conn = imaplib.IMAP4(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
             conn.starttls(ctx)
     except ssl.SSLError as e:
         raise ToolError(_tls_help(IMAP_HOST, IMAP_PORT, mode, e))
@@ -421,6 +436,14 @@ def imap_connect():
         raise ToolError("The mail server rejected the login for '%s' (%s). For "
                         "Bridge, use the Bridge password rather than your Proton "
                         "account password." % (USER, e))
+    except OSError as e:
+        try:
+            conn.shutdown()
+        except Exception:
+            pass
+        raise ToolError("The IMAP server at %s:%s stopped answering during "
+                        "login (%s). If this is Proton Bridge, check it is "
+                        "running and signed in." % (IMAP_HOST, IMAP_PORT, e))
     return conn
 
 
@@ -4131,8 +4154,17 @@ def handle(req):
         except Exception as e:
             if audited:
                 _audit(name, args, "error", str(e))
-            _result(id_, {"content": [{"type": "text",
-                          "text": "Unexpected error in %s: %s" % (name, e)}],
+            # Sending tools also talk SMTP, whose timeout this setting does
+            # not govern, so they keep the plain error.
+            if (name not in _SEND_TOOLS
+                    and isinstance(e, (TimeoutError, imaplib.socket.timeout))):
+                text = ("The mail server stopped answering, so %s timed out. "
+                        "If IMAP is just slow on a large mailbox, raise "
+                        "PROTON_IMAP_TIMEOUT_S (now %g seconds)."
+                        % (name, IMAP_TIMEOUT))
+            else:
+                text = "Unexpected error in %s: %s" % (name, e)
+            _result(id_, {"content": [{"type": "text", "text": text}],
                           "isError": True})
     elif method in ("notifications/cancelled",):
         pass
