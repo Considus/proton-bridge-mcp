@@ -857,9 +857,10 @@ def tool_search_all_mail(args):
 
     In Proton a message lives in one folder but also appears under each label
     and again in All Mail, so a naive sweep returns the same mail several times.
-    Results are keyed on Message-ID, All Mail is scanned last as a safety net
-    rather than a source, and every hit carries its folder's UIDVALIDITY so the
-    uids are actually safe to act on."""
+    Copies are matched on Message-ID plus the arrival time and size the server
+    records, All Mail is scanned last as a safety net rather than a source, and
+    every hit carries its folder's UIDVALIDITY so the uids are actually safe to
+    act on."""
     limit = int(args.get("limit", 25))
     crit = _build_search(args)
     conn = imap_connect()
@@ -883,17 +884,32 @@ def tool_search_all_mail(args):
                 continue
             uids = (data[0].split() if data and data[0] else [])[::-1][:limit * 2]
             for u in uids:
-                typ, md = conn.uid("FETCH", u, "(BODY.PEEK[HEADER.FIELDS "
-                                               "(FROM SUBJECT DATE MESSAGE-ID)])")
-                if typ != "OK" or not md or md[0] is None:
+                typ, md = conn.uid("FETCH", u, "(INTERNALDATE RFC822.SIZE BODY.PEEK["
+                                               "HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
+                if typ != "OK" or not md or not isinstance(md[0], tuple):
                     continue
                 env = _parse_envelope(md[0][1])
-                key = env["message_id"] or "%s:%s" % (name, u.decode())
-                if key in found:
+                # The sender writes Message-ID, so it alone proves nothing.
+                # Merge only rows whose server-assigned arrival time and size
+                # match too, and never two uids of one mailbox. A wrong key
+                # costs an extra row, never a hidden message.
+                meta = b" ".join([md[0][0]] + [p for p in md[1:] if isinstance(p, bytes)])
+                meta = meta.decode("ascii", "replace")
+                idate = re.search(r'INTERNALDATE "([^"]*)"', meta)
+                size = re.search(r"RFC822\.SIZE (\d+)", meta)
+                uid = u.decode()
+                if env["message_id"] and idate and size:
+                    key = (env["message_id"], idate.group(1), size.group(1))
+                else:
+                    key = (name, uid)
+                if key in found and name not in found[key]["seen"]:
                     found[key]["also"].append(name)
+                    found[key]["seen"].add(name)
                     continue
-                found[key] = {"folder": name, "uid": u.decode(),
-                              "validity": validity, "env": env, "also": []}
+                if key in found:
+                    key = (name, uid)
+                found[key] = {"folder": name, "uid": uid, "validity": validity,
+                              "env": env, "also": [], "seen": {name}}
     finally:
         try:
             conn.logout()

@@ -433,6 +433,164 @@ class FolderListing(unittest.TestCase):
         self.assertEqual(server._special_folder(conn, "sent"), "Sent")
 
 
+class SearchAllMailDedupe(unittest.TestCase):
+    """search_all_mail collapses copies of one stored message, never two
+    messages that only share a Message-ID. The sender writes that header, so
+    a spoof reusing a real message's Message-ID must not hide the real one."""
+
+    MID = "<stmt-2026-01@bank.example.test>"
+    DATE = "Mon, 05 Jan 2026 09:00:00 +0000"
+    REAL = ("statement@bank.example.test", "Your January statement")
+
+    class Fake:
+        """boxes: [(name, flags, [(uid, header, internaldate, size)])]."""
+
+        def __init__(self, boxes, items_after_literal=False, no_meta=False):
+            self.boxes = boxes
+            self.items_after_literal = items_after_literal
+            self.no_meta = no_meta
+            self.selected = None
+
+        def list(self):
+            return "OK", ['(%s) "/" "%s"' % (flags, name)
+                          for name, flags, _ in self.boxes]
+
+        def select(self, mailbox, readonly=False):
+            self.selected = mailbox.strip('"')
+            return "OK", [b"1"]
+
+        def response(self, name):
+            return name, [b"42"]
+
+        def _msgs(self):
+            for name, _, msgs in self.boxes:
+                if name == self.selected:
+                    return msgs
+            return []
+
+        def uid(self, cmd, *args):
+            cmd = cmd.upper()
+            if cmd == "SEARCH":
+                uids = sorted(int(m[0]) for m in self._msgs())
+                return "OK", [b" ".join(str(u).encode() for u in uids)]
+            if cmd == "FETCH":
+                u, spec = args[0].decode(), args[1].upper()
+                for uid, hdr, idate, size in self._msgs():
+                    if uid != u:
+                        continue
+                    # A real server returns only the items asked for.
+                    meta = ""
+                    if "INTERNALDATE" in spec and not self.no_meta:
+                        meta += ' INTERNALDATE "%s"' % idate
+                    if "RFC822.SIZE" in spec and not self.no_meta:
+                        meta += " RFC822.SIZE %d" % size
+                    lit = " BODY[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)] {%d}" % len(hdr)
+                    if self.items_after_literal:
+                        return "OK", [(("1 (UID %s%s" % (u, lit)).encode(), hdr),
+                                      (meta + ")").encode()]
+                    return "OK", [(("1 (UID %s%s%s" % (u, meta, lit)).encode(), hdr),
+                                  b")"]
+                return "NO", None
+            return "NO", None
+
+        def logout(self):
+            return "BYE", []
+
+    def _hdr(self, sender, subject, mid, date=None):
+        return ("From: %s\r\nSubject: %s\r\nDate: %s\r\nMessage-ID: %s\r\n\r\n"
+                % (sender, subject, date or self.DATE, mid)).encode()
+
+    def _real(self):
+        return self._hdr(self.REAL[0], self.REAL[1], self.MID)
+
+    def _spoof(self):
+        # Copies From, Subject and Date exactly; only the server-assigned
+        # arrival time and size give it away.
+        return self._hdr(self.REAL[0], self.REAL[1], self.MID)[:-4] + \
+            b"\r\nX-Pad: spoof\r\n\r\n"
+
+    def _run(self, fake):
+        with mock.patch.object(server, "imap_connect", return_value=fake):
+            return server.tool_search_all_mail({})
+
+    REAL_META = ("05-Jan-2026 09:00:01 +0000", 4100)
+    SPOOF_META = ("12-Jan-2026 14:30:00 +0000", 3900)
+
+    def test_spoof_in_an_earlier_mailbox_does_not_hide_the_real_message(self):
+        fake = self.Fake([
+            ("INBOX", "\\HasNoChildren", [("10", self._spoof()) + self.SPOOF_META]),
+            ("Archive", "\\HasNoChildren \\Archive", [("20", self._real()) + self.REAL_META]),
+            ("All Mail", "\\HasNoChildren \\All", [
+                ("101", self._real()) + self.REAL_META,
+                ("102", self._spoof()) + self.SPOOF_META]),
+        ])
+        out = self._run(fake)
+        self.assertIn("2 distinct message(s)", out)
+        self.assertIn("[INBOX uid 10,", out)
+        self.assertIn("[Archive uid 20,", out, "the real message was hidden")
+        spoof_row = [r for r in out.split("\n\n") if "[INBOX uid 10," in r][0]
+        self.assertNotIn("Archive", spoof_row,
+                         "the real message's folder was credited to the spoof")
+
+    def test_spoof_in_the_same_mailbox_does_not_hide_the_real_message(self):
+        fake = self.Fake([
+            ("INBOX", "\\HasNoChildren", [
+                ("9", self._real()) + self.REAL_META,
+                ("11", self._spoof()) + self.SPOOF_META]),
+            ("All Mail", "\\HasNoChildren \\All", [
+                ("101", self._real()) + self.REAL_META,
+                ("102", self._spoof()) + self.SPOOF_META]),
+        ])
+        out = self._run(fake)
+        self.assertIn("2 distinct message(s)", out)
+        self.assertIn("[INBOX uid 11,", out)
+        self.assertIn("[INBOX uid 9,", out, "the real message was hidden")
+
+    def test_two_uids_in_one_mailbox_are_never_merged(self):
+        """Even a spoof matching arrival time and size exactly is a different
+        message when it has its own uid in the same mailbox."""
+        fake = self.Fake([
+            ("INBOX", "\\HasNoChildren", [
+                ("9", self._real()) + self.REAL_META,
+                ("11", self._real()) + self.REAL_META]),
+        ])
+        out = self._run(fake)
+        self.assertIn("2 distinct message(s)", out)
+        self.assertIn("[INBOX uid 9,", out)
+        self.assertIn("[INBOX uid 11,", out)
+
+    def test_no_server_metadata_lists_rows_separately(self):
+        """Without INTERNALDATE and size nothing proves two rows are one
+        message, so both are shown rather than one hidden."""
+        fake = self.Fake([
+            ("INBOX", "\\HasNoChildren", [("10", self._spoof()) + self.SPOOF_META]),
+            ("Archive", "\\HasNoChildren", [("20", self._real()) + self.REAL_META]),
+        ], no_meta=True)
+        out = self._run(fake)
+        self.assertIn("[INBOX uid 10,", out)
+        self.assertIn("[Archive uid 20,", out, "the real message was hidden")
+
+    def _labelled(self, **kw):
+        return self.Fake([
+            ("Folders/Bank", "\\HasNoChildren", [("5", self._real()) + self.REAL_META]),
+            ("Labels/Tax", "\\HasNoChildren", [("7", self._real()) + self.REAL_META]),
+            ("All Mail", "\\HasNoChildren \\All", [("101", self._real()) + self.REAL_META]),
+        ], **kw)
+
+    def test_one_message_under_a_folder_a_label_and_all_mail_is_one_row(self):
+        out = self._run(self._labelled())
+        self.assertIn("1 distinct message(s) across 3 mailbox(es)", out)
+        self.assertIn("[Folders/Bank uid 5,", out)
+        self.assertIn("also in: All Mail, Labels/Tax", out)
+
+    def test_copies_merge_when_the_items_follow_the_literal(self):
+        """Servers may send INTERNALDATE and RFC822.SIZE after the header
+        literal; imaplib then hands them back as a separate element."""
+        out = self._run(self._labelled(items_after_literal=True))
+        self.assertIn("1 distinct message(s) across 3 mailbox(es)", out)
+        self.assertIn("also in: All Mail, Labels/Tax", out)
+
+
 class BulkGuards(unittest.TestCase):
     def test_rejects_non_numeric_uids(self):
         with self.assertRaises(server.ToolError):
