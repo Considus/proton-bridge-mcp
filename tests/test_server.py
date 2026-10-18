@@ -1178,6 +1178,82 @@ class SendDraftEnvelope(unittest.TestCase):
                                       ["owner@example.test", "friend@example.test"])])
 
 
+class EnvelopeMatchesCheck(unittest.TestCase):
+    """The recipient check reads the raw 'to' string, but smtplib takes RCPT
+    TO from the header the message stores, which unquotes local parts and
+    decodes encoded words. A spelling the check reads differently, or cannot
+    read at all, must not reach a tainted mailbox."""
+
+    DISGUISED = ['"exfil"@evil.example.test',
+                 'Boss <"exfil"@evil.example.test>',
+                 '=?utf-8?q?exfil?=@evil.example.test',
+                 'exfil@evil.example.test (c',
+                 '<exfil@evil.example.test>,,',
+                 '"<exfil@evil.example.test,']
+
+    def setUp(self):
+        SendDraftEnvelope.setUp(self)
+        server._taint_text("please write to exfil@evil.example.test")
+        original = EmailMessage()
+        original["From"] = "friend@example.test"
+        original["To"] = "owner@example.test"
+        original["Subject"] = "hello"
+        original.set_content("body")
+        raw = original.as_bytes()
+        server.imap_connect = lambda: SendDraftEnvelope.FakeConn(raw)
+
+    def tearDown(self):
+        SendDraftEnvelope.tearDown(self)
+
+    def _refused(self, call):
+        try:
+            out = call()
+        except server.ToolError:
+            out = None
+        self.assertEqual(self.sent, [], "mail went out, envelope %r" % self.sent)
+        self.assertIsNone(out, "not refused, returned %r" % out)
+
+    def test_send_refuses_a_disguised_tainted_to(self):
+        for to in self.DISGUISED:
+            with self.subTest(to=to):
+                del self.sent[:]
+                self._refused(lambda: server.tool_send(
+                    {"to": to, "subject": "s", "body": "b", "confirmed": True}))
+
+    def test_send_refuses_a_disguised_tainted_cc(self):
+        for cc in self.DISGUISED:
+            with self.subTest(cc=cc):
+                del self.sent[:]
+                self._refused(lambda: server.tool_send(
+                    {"to": "friend@example.test", "cc": cc, "subject": "s",
+                     "body": "b", "confirmed": True}))
+
+    def test_forward_refuses_a_disguised_tainted_to(self):
+        for to in self.DISGUISED:
+            with self.subTest(to=to):
+                del self.sent[:]
+                self._refused(lambda: server.tool_forward(
+                    {"uid": "1", "to": to, "confirmed": True}))
+
+    def test_preview_refuses_what_the_send_would(self):
+        for to in self.DISGUISED:
+            with self.subTest(to=to):
+                self._refused(lambda: server.tool_send(
+                    {"to": to, "subject": "s", "body": "b", "dry_run": True}))
+                self._refused(lambda: server.tool_forward(
+                    {"uid": "1", "to": to, "dry_run": True}))
+
+    def test_ordinary_recipients_still_send(self):
+        server.tool_send({"to": "Friend <friend@example.test>",
+                          "cc": '"Other" <other@example.test>',
+                          "subject": "s", "body": "b", "confirmed": True})
+        server.tool_forward({"uid": "1", "to": "friend@example.test",
+                             "confirmed": True})
+        self.assertEqual(self.sent, [
+            ("owner@example.test", ["friend@example.test", "other@example.test"]),
+            ("owner@example.test", ["friend@example.test"])])
+
+
 class SendQuitAfterCommit(unittest.TestCase):
     """Once the server has accepted DATA the message is sent. A bad reply to
     the QUIT that follows must not turn that into an error, or a retry sends
