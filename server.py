@@ -2337,9 +2337,12 @@ def _safe_name(filename, uid):
     name = re.sub(r"\s+", " ", name).strip().lstrip(".-")
     if os.path.splitext(name)[0].lower() in _WIN_RESERVED:
         name = "_" + name
-    stem, ext = os.path.splitext(name or "attachment.bin")
-    ext = ext[:16]
-    return "uid%s_%s" % (uid, stem[:120 - len(ext)] + ext)
+    name = name or "attachment.bin"
+    if len(name) > 120:
+        stem, ext = os.path.splitext(name)
+        ext = ext[:16]
+        name = stem[:120 - len(ext)] + ext
+    return "uid%s_%s" % (uid, name)
 
 
 def _resolve_dest(dest_dir):

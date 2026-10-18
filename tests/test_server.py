@@ -3723,6 +3723,10 @@ class SafeNameKeepsExtension(unittest.TestCase):
         "C" * 112 + ".command.pdf": ".pdf",
     }
 
+    def test_names_under_the_cap_are_unchanged(self):
+        name = "notes." + "a" * 20
+        self.assertEqual(server._safe_name(name, 1), "uid1_" + name)
+
     def test_long_names_keep_the_declared_extension(self):
         for name, ext in self.PADDED.items():
             got = server._safe_name(name, "42")
