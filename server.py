@@ -920,15 +920,22 @@ def tool_search_all_mail(args):
                     continue
                 if key in found:
                     key = (name, uid)
+                # Rank on when the server received it. The Date header is the
+                # sender's to set, so a forged one would take the top slots.
+                try:
+                    rank = time.mktime(imaplib.Internaldate2tuple(
+                        ('INTERNALDATE "%s"' % idate.group(1)).encode()))
+                except Exception:
+                    rank = _sort_key(env)
                 found[key] = {"folder": name, "uid": uid, "validity": validity,
-                              "env": env, "also": [], "seen": {name}}
+                              "env": env, "also": [], "seen": {name}, "rank": rank}
     finally:
         try:
             conn.logout()
         except Exception:
             pass
 
-    hits = sorted(found.values(), key=lambda r: _sort_key(r["env"]), reverse=True)
+    hits = sorted(found.values(), key=lambda r: r["rank"], reverse=True)
     total = len(hits)
     rows = []
     for r in hits[:limit]:

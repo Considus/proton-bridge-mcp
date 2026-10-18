@@ -591,6 +591,57 @@ class SearchAllMailDedupe(unittest.TestCase):
         self.assertIn("also in: All Mail, Labels/Tax", out)
 
 
+class SearchAllMailRanking(unittest.TestCase):
+    """search_all_mail keeps the most recent arrivals. The sender writes the
+    Date header, so a forged date must not take the top slots and push mail
+    that really arrived later out of the results."""
+
+    Fake = SearchAllMailDedupe.Fake
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(server, k) for k in (
+            "STATE_FILE", "AUDIT_LOG", "ATTACH_DIR")}
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+
+    @staticmethod
+    def _hdr(sender, mid, date):
+        return ("From: %s\r\nSubject: Invoice\r\nDate: %s\r\nMessage-ID: %s\r\n\r\n"
+                % (sender, date, mid)).encode()
+
+    def _run(self, boxes, limit):
+        with mock.patch.object(server, "imap_connect", return_value=self.Fake(boxes)):
+            return server.tool_search_all_mail({"limit": limit})
+
+    REAL = ("21", _hdr.__func__("billing@shop.example.test", "<inv-2@shop.example.test>",
+                                "Mon, 12 Jan 2026 14:30:00 +0000"),
+            "12-Jan-2026 14:30:05 +0000", 4000)
+
+    def test_future_date_does_not_outrank_later_arrival(self):
+        forged = ("20", self._hdr("attacker@evil.example.test", "<x@evil.example.test>",
+                                  "Tue, 01 Jan 2036 00:00:00 +0000"),
+                  "05-Jan-2026 09:00:00 +0000", 3000)
+        out = self._run([("INBOX", "\\HasNoChildren", [forged]),
+                         ("Archive", "\\HasNoChildren", [self.REAL])], 1)
+        self.assertIn("[Archive uid 21,", out, "the newest arrival was cut")
+        self.assertNotIn("[INBOX uid 20,", out)
+
+    def test_offset_skew_does_not_outrank_later_arrival(self):
+        # 08:00 -1200 reads as earlier the same day but sorts as 20:00 UTC.
+        forged = ("20", self._hdr("attacker@evil.example.test", "<y@evil.example.test>",
+                                  "Mon, 12 Jan 2026 08:00:00 -1200"),
+                  "05-Jan-2026 09:00:00 +0000", 3000)
+        out = self._run([("INBOX", "\\HasNoChildren", [forged, self.REAL])], 1)
+        self.assertIn("[INBOX uid 21,", out, "the newest arrival was cut")
+        self.assertNotIn("[INBOX uid 20,", out)
+
+
 class BulkGuards(unittest.TestCase):
     def test_rejects_non_numeric_uids(self):
         with self.assertRaises(server.ToolError):
