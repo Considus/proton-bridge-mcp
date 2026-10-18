@@ -307,7 +307,7 @@ The bulk tools only accept explicit numbered messages, never "everything in this
 
 ### There's a ceiling on a bad hour
 
-Sending is capped at 30 an hour and organising at 2000, both adjustable. The audit log tells you what happened after the fact, a limit stops it happening two hundred more times. Sends are capped far tighter than filing on purpose, since moving a thousand messages is tidying up and sending a thousand is an incident.
+Sending is capped at 30 recipients an hour and organising at 2000, both adjustable. The audit log tells you what happened after the fact, a limit stops it happening two hundred more times. Sends are capped far tighter than filing on purpose, since moving a thousand messages is tidying up and sending a thousand is an incident.
 
 ### Attachments are files, not code
 

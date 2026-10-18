@@ -368,16 +368,24 @@ def _replace_state(state):
 _SEND_TOOLS = {"send", "forward", "reply", "reply_all", "send_draft", "unsubscribe"}
 
 
-def _rate_check(tool):
+def _rate_check(tool, n=1):
     """A cap on how much damage a bad hour can do. The audit log tells you what
-    happened afterwards; this stops it happening a thousand times first."""
+    happened afterwards; this stops it happening a thousand times first.
+    n is how many units this uses: a send uses one per recipient."""
     bucket = "send" if tool in _SEND_TOOLS else "write"
     limit = RATE_LIMITS.get(bucket, 0)
-    if limit <= 0:
+    if limit <= 0 or n <= 0:
         return
     now = time.time()
     state = _read_state()
     hits = [t for t in state.get("rate", {}).get(bucket, []) if now - t < 3600]
+    if n > 1 and len(hits) + n > limit:
+        raise ToolError(
+            "Rate limit reached for %s operations: each recipient counts as "
+            "one, this message needs %d more, and %d of the %d allowed in the "
+            "last hour are used. Nothing was sent. Raise PROTON_RATE_%s_PER_HOUR "
+            "if this limit is wrong for how you work."
+            % (bucket, n, len(hits), limit, bucket.upper()))
     if len(hits) >= limit:
         oldest = min(hits)
         raise ToolError(
@@ -386,7 +394,7 @@ def _rate_check(tool):
             "PROTON_RATE_%s_PER_HOUR if this limit is wrong for how you work."
             % (bucket, len(hits), limit,
                max(1, int((3600 - (now - oldest)) / 60)), bucket.upper()))
-    hits.append(now)
+    hits.extend([now] * n)
     state.setdefault("rate", {})[bucket] = hits
     _write_state(state)
 
@@ -2342,7 +2350,11 @@ def _smtp_send(msg):
     mode = _security_mode("PROTON_SMTP_SECURITY", SMTP_PORT)
     ctx = _tls_context(SMTP_HOST)
     smtp_user, smtp_pw = smtp_credentials()
-    _check_recipients(*_envelope_recipients(msg))
+    rcpts = _envelope_recipients(msg)
+    _check_recipients(*rcpts)
+    # The send budget counts mail sent, one unit per recipient. The dispatcher
+    # has already charged this call as one.
+    _rate_check("send", len(rcpts) - 1)
     try:
         if mode == "ssl":
             server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30, context=ctx)
