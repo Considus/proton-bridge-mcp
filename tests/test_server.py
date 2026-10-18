@@ -1626,6 +1626,195 @@ class RemoveLabelTarget(unittest.TestCase):
         self.assertIn("7", fake.boxes["INBOX"])
 
 
+class EightBitHeaders(unittest.TestCase):
+    """A header holding raw 8-bit bytes comes back from the compat32 parser as
+    an email.header.Header, not a str. One such message must not fail a tool
+    that reads many messages, nor one that reads that message alone."""
+
+    class Mailbox:
+        """A stateful fake IMAP server: {mailbox: {uid: raw message bytes}}."""
+
+        def __init__(self, boxes, header_search=True):
+            self.boxes = boxes
+            self.header_search = header_search
+            self.selected = None
+            self.expunged = []              # [(mailbox, uid)]
+
+        def list(self):
+            return "OK", ['(\\HasNoChildren) "/" "%s"' % b for b in self.boxes]
+
+        def select(self, mailbox, readonly=False):
+            name = mailbox.strip('"')
+            if name not in self.boxes:
+                return "NO", [b"no such mailbox"]
+            self.selected = name
+            return "OK", [str(len(self.boxes[name])).encode()]
+
+        def response(self, name):
+            return name, [b"42"]
+
+        def uid(self, cmd, *args):
+            for a in args:
+                if isinstance(a, str):
+                    a.encode("ascii")       # imaplib sends str arguments as ASCII
+            cmd = cmd.upper()
+            box = self.boxes[self.selected]
+            if cmd == "SEARCH":
+                if "HEADER" not in args:
+                    return "OK", [" ".join(box).encode()]
+                want = ("Message-ID: %s\r\n" % args[-1].strip('"')).encode()
+                hits = [u for u, raw in box.items()
+                        if self.header_search and want in raw]
+                return "OK", [" ".join(hits).encode()]
+            if cmd == "FETCH":
+                spec = args[0]
+                if isinstance(spec, bytes):
+                    spec = spec.decode()
+                out = [(("%s (UID %s FLAGS (\\Seen)" % (u, u)).encode(), raw)
+                       for u, raw in box.items() if spec in ("1:*", u)]
+                return ("OK", out) if out else ("NO", None)
+            if cmd == "STORE":
+                return "OK", [b"done"]
+            if cmd == "EXPUNGE":
+                box.pop(args[0], None)
+                self.expunged.append((self.selected, args[0]))
+                return "OK", [b"done"]
+            return "NO", None
+
+        def expunge(self):
+            return "OK", [b"done"]
+
+        def logout(self):
+            return "BYE", []
+
+    @staticmethod
+    def _raw(subject, mid, extra=b""):
+        return (b"From: a@example.test\r\nTo: me@example.test\r\nSubject: "
+                + subject + b"\r\nDate: Mon, 01 Jan 2026 00:00:00 +0000\r\n"
+                b"Message-ID: " + mid + b"\r\n" + extra + b"\r\nbody\r\n")
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect, server.USER, server.ALIAS_FROM)
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+        server.USER, server.ALIAS_FROM = "me@example.test", "alias@example.test"
+        self.clean = self._raw(b"Budget", b"<clean@example.test>")
+        self.poison = self._raw(
+            b"Other topic", b"<caf\xc3\xa9@example.test>",
+            b"Reply-To: rev@example.test\r\n"
+            b"References: <x\xc3\xa9@example.test>\r\n"
+            b"X-SimpleLogin-Type: Forward\xc3\xa9\r\n"
+            b"Authentication-Results: mx.example.test; spf=pass\xc3\xa9\r\n"
+            b"List-Unsubscribe: <mailto:off\xc3\xa9@example.test>\r\n"
+            b"List-Unsubscribe-Post: List-Unsubscribe=One-Click\xc3\xa9\r\n")
+        self.same_subject = self._raw(b"Re: Budget", b"<th\xc3\xa9@example.test>")
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect, server.USER, server.ALIAS_FROM) = self._saved
+
+    def _connect(self, boxes, **kw):
+        fake = self.Mailbox(boxes, **kw)
+        server.imap_connect = lambda: fake
+        return fake
+
+    def _labelled(self):
+        return self._connect({
+            "INBOX": {"1": self.clean, "2": self.poison},
+            "Trash": {},
+            "All Mail": {"1": self.clean, "2": self.poison},
+            "Labels/Work": {"5": self.clean, "6": self.poison},
+        })
+
+    def test_search_mail_lists_every_row(self):
+        self._connect({"INBOX": {"1": self.clean, "2": self.poison}})
+        out = server.tool_search_mail({"folder": "INBOX"})
+        self.assertIn("2 message(s)", out)
+        self.assertIn("Budget", out)
+        self.assertIn("Other topic", out)
+
+    def test_search_all_mail_lists_every_row(self):
+        self._connect({"INBOX": {"1": self.clean, "2": self.poison},
+                       "All Mail": {"1": self.clean, "2": self.poison}})
+        out = server.tool_search_all_mail({})
+        self.assertIn("2 distinct message(s)", out)
+        self.assertIn("Other topic", out)
+
+    def test_find_thread_reads_past_it(self):
+        self._connect({"INBOX": {"1": self.clean},
+                       "All Mail": {"1": self.clean, "2": self.poison,
+                                    "3": self.same_subject}})
+        out = server.tool_find_thread({"uid": "1"})
+        self.assertIn("2 message(s)", out)
+        self.assertIn("uid 3", out)
+        self.assertNotIn("uid 2", out)
+
+    def test_find_thread_on_it_matches_by_references(self):
+        self._connect({"INBOX": {"2": self.poison},
+                       "All Mail": {"1": self.clean, "2": self.poison}})
+        out = server.tool_find_thread({"uid": "2"})
+        self.assertIn("1 message(s)", out)
+
+    def test_bulk_remove_label_takes_it_off_both(self):
+        fake = self._labelled()
+        out = server.tool_bulk_remove_label(
+            {"uids": ["1", "2"], "folder": "INBOX", "label": "Work",
+             "confirmed": True})
+        self.assertIn("from 2 of 2", out)
+        self.assertEqual(sorted(fake.expunged),
+                         [("Labels/Work", "5"), ("Labels/Work", "6")])
+
+    def test_remove_label_scan_reads_past_it(self):
+        fake = self._connect({
+            "INBOX": {"1": self.clean}, "Trash": {},
+            "Labels/Work": {"6": self.poison, "5": self.clean},
+        }, header_search=False)
+        server.tool_remove_label({"uid": "1", "folder": "INBOX",
+                                  "label": "Work", "confirmed": True})
+        self.assertEqual(fake.expunged, [("Labels/Work", "5")])
+
+    def test_remove_label_from_it(self):
+        fake = self._labelled()
+        server.tool_remove_label({"uid": "2", "folder": "INBOX",
+                                  "label": "Work", "confirmed": True})
+        self.assertEqual(fake.expunged, [("Labels/Work", "6")])
+
+    def test_two_different_8bit_message_ids_stay_different(self):
+        other = self._raw(b"Other topic", b"<caf\xc3\xa8@example.test>")
+        fake = self._connect({
+            "INBOX": {"2": self.poison}, "Trash": {},
+            "Labels/Work": {"5": other, "6": self.poison}})
+        server.tool_remove_label({"uid": "2", "folder": "INBOX",
+                                  "label": "Work", "confirmed": True})
+        self.assertEqual(fake.expunged, [("Labels/Work", "6")])
+
+    def test_read_message(self):
+        self._connect({"INBOX": {"2": self.poison}})
+        out = server.tool_read_message({"uid": "2"})
+        self.assertIn("Other topic", out)
+        self.assertIn("SimpleLogin alias mail", out)
+
+    def test_get_headers(self):
+        self._connect({"INBOX": {"2": self.poison}})
+        out = server.tool_get_headers({"uid": "2"})
+        self.assertIn("not a red flag", out)
+
+    def test_reply_preview(self):
+        self._connect({"INBOX": {"2": self.poison}})
+        out = server.tool_reply({"uid": "2", "body": "Thanks.",
+                                 "dry_run": True})
+        self.assertIn("DRY RUN", out)
+
+    def test_unsubscribe_options(self):
+        self._connect({"INBOX": {"2": self.poison}})
+        out = server.tool_unsubscribe({"uid": "2"})
+        self.assertIn("Email: off", out)
+        self.assertIn("through an alias", out)
+
+
 class DeleteLabel(unittest.TestCase):
     """Labels can be deleted, folders cannot, and a server without a Labels/
     namespace is refused because there a 'label' holds the real messages."""
