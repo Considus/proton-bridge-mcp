@@ -2415,5 +2415,98 @@ class PdfExtraction(unittest.TestCase):
         self.assertIn("stopped after", out)
 
 
+class HostileHtml(unittest.TestCase):
+    """Stripping the HTML of a mail an outsider sent has to run in linear time.
+    A few KB of unclosed <script> or <style> tags, or a run of '<', used to
+    take seconds to hours, and every later tool call waited behind it."""
+
+    LIMIT_S = 1.0
+
+    class FakeConn:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def select(self, folder, readonly=True):
+            return "OK", [b"1"]
+
+        def response(self, code):
+            return code, [b"1"]
+
+        def uid(self, cmd, *args):
+            if cmd == "FETCH":
+                return "OK", [(b"1 (UID 1 BODY[]", self.raw)]
+            return "NO", None
+
+        def logout(self):
+            return "BYE", []
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect, set(server._CORRESPONDENTS),
+                       set(server._TAINTED))
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect, corr, taint) = self._saved
+        server._CORRESPONDENTS.clear()
+        server._CORRESPONDENTS.update(corr)
+        server._TAINTED.clear()
+        server._TAINTED.update(taint)
+
+    def _timed(self, fn, *args):
+        start = time.monotonic()
+        out = fn(*args)
+        return out, time.monotonic() - start
+
+    def test_unclosed_script_tags_read_quickly(self):
+        msg = EmailMessage()
+        msg["From"] = "sender@example.test"
+        msg["To"] = "me@example.test"
+        msg["Subject"] = "Hello"
+        msg.set_content("<script>" * 1000, subtype="html")
+        raw = msg.as_bytes()
+        server.imap_connect = lambda: self.FakeConn(raw)
+        out, elapsed = self._timed(server.tool_read_message, {"uid": "1"})
+        self.assertLess(elapsed, self.LIMIT_S,
+                        "read_message took %.1f s" % elapsed)
+        self.assertIn("Subject: Hello", out)
+
+    def test_unclosed_style_tags_behind_an_empty_text_part(self):
+        raw = ("From: sender@example.test\r\nTo: me@example.test\r\n"
+               "MIME-Version: 1.0\r\n"
+               "Content-Type: multipart/alternative; boundary=b\r\n\r\n"
+               "--b\r\nContent-Type: text/plain\r\n\r\n\r\n"
+               "--b\r\nContent-Type: text/html\r\n\r\n%s\r\n"
+               "--b--\r\n" % ("<style>" * 1000)).encode()
+        _, elapsed = self._timed(server._extract_body, raw)
+        self.assertLess(elapsed, self.LIMIT_S,
+                        "_extract_body took %.1f s" % elapsed)
+
+    def test_a_run_of_open_brackets_strips_quickly(self):
+        _, elapsed = self._timed(server._strip_html, "<" * 120000)
+        self.assertLess(elapsed, self.LIMIT_S,
+                        "_strip_html took %.1f s" % elapsed)
+
+    def test_unicode_lookalike_tag_names_do_not_raise(self):
+        # Long s and dotless i fold to 's' and 'i' under Unicode matching.
+        for tag in ("\u017fcript", "scr\u0131pt", "\u017ftyle"):
+            out = server._strip_html("<%s>A</%s>B<script>SECRET</script>D"
+                                     % (tag, tag))
+            self.assertNotIn("SECRET", out)
+            self.assertIn("BD", out)
+
+    def test_ordinary_html_is_stripped_as_before(self):
+        html = ("<html><head><STYLE type=\"text/css\">p { color: red }</style>"
+                "</head><body><p>Hi &amp; welcome</p><script>bad()</SCRIPT>"
+                "Line<br/>two<style>x</style></body></html>")
+        self.assertEqual(server._strip_html(html), "Hi & welcome\n\nLine\ntwo")
+        self.assertEqual(server._strip_html("a <script>left open"),
+                         "a left open")
+
+
 if __name__ == "__main__":
     unittest.main()
