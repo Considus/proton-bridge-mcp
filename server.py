@@ -1089,6 +1089,29 @@ def _new_message(to, cc, subject, body, in_reply_to=None, references=None,
     return msg
 
 
+def _envelope_recipients(msg):
+    """RCPT TO exactly as smtplib's send_message derives it: the first To,
+    Bcc and Cc as the message stores them (unquoted, decoded), or the Resent-
+    ones when a Resent-Date is present. This, not the string the caller
+    passed, is what the recipient check has to see."""
+    resent = msg.get_all("Resent-Date") or []
+    if len(resent) > 1:
+        raise ToolError("Refusing to send: the message carries more than one "
+                        "Resent- block. Nothing was sent.")
+    prefix = "Resent-" if resent else ""
+    fields = [f for f in (msg[prefix + "To"], msg[prefix + "Bcc"],
+                          msg[prefix + "Cc"]) if f is not None]
+    rcpts = [addr for _, addr in email.utils.getaddresses(fields) if addr]
+    # Each address must read back as itself, so the recipient check sees
+    # exactly the string that goes into RCPT TO. One that does not is refused.
+    for addr in rcpts:
+        if email.utils.getaddresses([addr]) != [("", addr)]:
+            raise ToolError("Refusing to send: the recipient %r cannot be read "
+                            "back as one address, so it cannot be checked. "
+                            "Nothing was sent." % addr[:80])
+    return rcpts
+
+
 def _find_drafts_folder(conn):
     try:
         return _special_folder(conn, "drafts")
@@ -1278,6 +1301,8 @@ def _do_reply(args, reply_all):
     note = ("\n  (alias mail, sent from %s so the alias stays masked)" % from_address
             if aliased and from_address else "")
     if args.get("dry_run"):
+        if not as_draft:
+            _check_recipients(*_envelope_recipients(reply))
         _taint_text(quoted)  # the preview shows the inbound body to the model
         return _dry("%s uid %s" % ("save a draft reply to" if as_draft
                                    else "send this reply to", uid),
@@ -1503,6 +1528,7 @@ def tool_send_draft(args):
         _check_sender(sender)
     _check_recipients(to, cc, bcc)
     if args.get("dry_run"):
+        _check_recipients(*_envelope_recipients(msg))
         return _dry("send draft uid %s" % uid, _preview(msg))
     refused = _smtp_send(msg)
     if refused:
@@ -1634,6 +1660,7 @@ def tool_unsubscribe(args):
     _check_recipients(target)
     out = _new_message(target, "", subject, "Please unsubscribe this address.")
     if args.get("dry_run"):
+        _check_recipients(*_envelope_recipients(out))
         return _dry("send an unsubscribe for uid %s" % uid,
                     _preview(out) + (["", "Caveat: " + advice[-1]] if aliased else []))
     refused = _smtp_send(out)
@@ -1977,6 +2004,7 @@ def _smtp_send(msg):
     mode = _security_mode("PROTON_SMTP_SECURITY", SMTP_PORT)
     ctx = _tls_context(SMTP_HOST)
     smtp_user, smtp_pw = smtp_credentials()
+    _check_recipients(*_envelope_recipients(msg))
     try:
         if mode == "ssl":
             server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30, context=ctx)
@@ -2029,6 +2057,7 @@ def tool_send(args):
                        references=args.get("references"),
                        from_address=from_address, attachments=files)
     if args.get("dry_run"):
+        _check_recipients(*_envelope_recipients(msg))
         return _dry("send this message", _preview(msg, files=files))
     refused = _smtp_send(msg)
     return _refused_note(refused) + "Sent from %s to %s (subject: %s)." % (
@@ -2076,6 +2105,7 @@ def tool_forward(args):
     fwd.add_attachment(original.as_bytes(), maintype="message",
                        subtype="rfc822", filename="original.eml")
     if args.get("dry_run"):
+        _check_recipients(*_envelope_recipients(fwd))
         return _dry("forward uid %s" % uid, _preview(fwd))
     refused = _smtp_send(fwd)
     return _refused_note(refused) + "Forwarded uid %s to %s." % (uid, to)
