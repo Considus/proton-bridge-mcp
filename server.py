@@ -95,13 +95,13 @@ SMTP_PORT = int(_cfg("PROTON_SMTP_PORT", "1025"))
 # peer that goes silent would otherwise hold every later request with it.
 def _imap_timeout():
     """Seconds an IMAP read or write may wait. 0 would make the socket
-    non-blocking and a negative or non-numeric value would break every
-    connect, so anything unusable falls back to 60."""
+    non-blocking, and a negative, infinite or non-numeric value would break
+    every connect, so anything unusable falls back to 60."""
     try:
         t = float(_cfg("PROTON_IMAP_TIMEOUT_S", "60"))
     except (TypeError, ValueError):
         return 60.0
-    return t if t > 0 else 60.0
+    return t if 0 < t < float("inf") else 60.0
 
 
 IMAP_TIMEOUT = _imap_timeout()
@@ -4154,8 +4154,14 @@ def handle(req):
         except Exception as e:
             if audited:
                 _audit(name, args, "error", str(e))
-            _result(id_, {"content": [{"type": "text",
-                          "text": "Unexpected error in %s: %s" % (name, e)}],
+            if isinstance(e, (TimeoutError, imaplib.socket.timeout)):
+                text = ("The mail server stopped answering, so %s timed out. "
+                        "If IMAP is just slow on a large mailbox, raise "
+                        "PROTON_IMAP_TIMEOUT_S (now %g seconds)."
+                        % (name, IMAP_TIMEOUT))
+            else:
+                text = "Unexpected error in %s: %s" % (name, e)
+            _result(id_, {"content": [{"type": "text", "text": text}],
                           "isError": True})
     elif method in ("notifications/cancelled",):
         pass

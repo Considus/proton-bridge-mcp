@@ -2109,11 +2109,24 @@ class ImapDeadline(unittest.TestCase):
         self.assertEqual(closed, [True])
 
     def test_unusable_timeout_setting_falls_back_to_default(self):
-        for bad in ("0", "-5", "soon"):
+        for bad in ("0", "-5", "soon", "inf", "nan"):
             with mock.patch.dict(os.environ, {"PROTON_IMAP_TIMEOUT_S": bad}):
                 self.assertEqual(server._imap_timeout(), 60.0, bad)
         with mock.patch.dict(os.environ, {"PROTON_IMAP_TIMEOUT_S": "12.5"}):
             self.assertEqual(server._imap_timeout(), 12.5)
+
+    def test_timeout_after_connect_names_the_setting(self):
+        def stalls(args):
+            raise imaplib.socket.timeout("timed out")
+
+        out = io.StringIO()
+        with mock.patch.dict(server.HANDLERS, {"list_folders": stalls}), \
+                mock.patch("sys.stdout", out):
+            server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "list_folders", "arguments": {}}})
+        res = json.loads(out.getvalue())["result"]
+        self.assertTrue(res.get("isError"))
+        self.assertIn("PROTON_IMAP_TIMEOUT_S", res["content"][0]["text"])
 
     def test_silent_before_greeting_starttls(self):
         self._assert_bounded(1143, greeting=False)
