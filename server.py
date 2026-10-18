@@ -2931,7 +2931,8 @@ def tool_bulk_move(args):
     dest = args["to_folder"]
 
     def check(conn):
-        if dest not in _list_folders(conn):
+        # INBOX is case-insensitive in IMAP (RFC 3501); other names are not.
+        if dest.upper() != "INBOX" and dest not in _list_folders(conn):
             raise ToolError("No folder called '%s'. Nothing was moved; "
                             "list_folders shows the exact names." % dest)
 

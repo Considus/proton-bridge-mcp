@@ -4483,6 +4483,11 @@ class BulkPreviewChecks(unittest.TestCase):
                                                to_folder="Trahs"))
                 self.assertIn("No folder called 'Trahs'", str(cm.exception))
 
+    def test_bulk_move_accepts_inbox_in_any_case(self):
+        out = server.tool_bulk_move({"uids": ["101"], "to_folder": "inbox",
+                                     "dry_run": True})
+        self.assertIn("Security alert for your account", out)
+
     def test_label_previews_refuse_a_missing_label(self):
         for fn in (server.tool_bulk_apply_label, server.tool_bulk_remove_label):
             with self.subTest(tool=fn.__name__):
