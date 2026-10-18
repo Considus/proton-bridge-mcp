@@ -1950,16 +1950,18 @@ def tool_bulk_remove_label(args):
                         "dry_run=true first, then confirm.")
     folder = args.get("folder", "INBOX")
     uids = _parse_uids(args)
-    if args.get("dry_run"):
-        return ("DRY RUN, nothing changed. Would remove label '%s' from %d "
-                "message(s) in '%s':\n  %s"
-                % (args["label"], len(uids), folder, ", ".join(uids)))
     conn = imap_connect()
     done, absent, failed = [], [], []
     try:
         target = _resolve_label_for_removal(conn, args["label"], folder)
         # Message-IDs come from the source folder, before switching mailbox.
-        _select_checked(conn, folder, args.get("uidvalidity"), readonly=True)
+        validity = _select_checked(conn, folder, args.get("uidvalidity"),
+                                   readonly=True)
+        if args.get("dry_run"):
+            return _dry("remove label '%s' from %d message(s) in '%s' "
+                        "(uidvalidity %s)" % (target, len(uids), folder,
+                                              validity or "unknown"),
+                        [_describe(conn, folder, u) for u in uids])
         mids = {}
         for uid in uids:
             try:
@@ -2850,18 +2852,25 @@ def _parse_uids(args):
     return out
 
 
-def _bulk(args, verb, apply_one, readonly=False):
+def _bulk(args, verb, apply_one, readonly=False, check=None):
     """Shared bulk driver. One connection for the whole batch instead of one
-    per message, and one failure doesn't abandon the rest."""
+    per message, and one failure doesn't abandon the rest. A dry run makes the
+    same checks as the real run and names each message, as the single-message
+    previews do."""
     folder = args.get("folder", "INBOX")
     uids = _parse_uids(args)
-    if args.get("dry_run"):
-        return ("DRY RUN, nothing changed. Would %s %d message(s) in '%s':\n  %s"
-                % (verb, len(uids), folder, ", ".join(uids)))
+    dry = bool(args.get("dry_run"))
     conn = imap_connect()
     done, failed = [], []
     try:
-        _select_checked(conn, folder, args.get("uidvalidity"), readonly=readonly)
+        if check:
+            check(conn)
+        validity = _select_checked(conn, folder, args.get("uidvalidity"),
+                                   readonly=readonly or dry)
+        if dry:
+            return _dry("%s %d message(s) in '%s' (uidvalidity %s)"
+                        % (verb, len(uids), folder, validity or "unknown"),
+                        [_describe(conn, folder, u) for u in uids])
         for uid in uids:
             try:
                 apply_one(conn, uid)
@@ -2901,20 +2910,21 @@ def tool_bulk_apply_label(args):
     label = args["label"]
     resolved = {}
 
+    def check(conn):
+        # Resolved once, on the batch's own connection, before any change.
+        resolved["target"] = _resolve_label(conn, label)
+
     def one(conn, uid):
-        # Resolved once, on the batch's own connection.
-        if "target" not in resolved:
-            resolved["target"] = _resolve_label(conn, label)
         typ, resp = conn.uid("COPY", uid, _folder_quote(resolved["target"]))
         if typ != "OK":
             raise RuntimeError(resp)
-    return _bulk(args, "label '%s'" % label, one)
+    return _bulk(args, "label '%s'" % label, one, check=check)
 
 
 def tool_bulk_move(args):
     """Gated: relocating a batch (Trash included) is the highest-blast-radius
     thing here. Marking and labelling are trivially reversible, this isn't."""
-    if not args.get("confirmed"):
+    if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing a bulk move without confirmed=true. Show the "
                         "user the uids and destination, or call with dry_run=true "
                         "first, then confirm.")
