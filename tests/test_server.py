@@ -1701,9 +1701,11 @@ class RemoveLabel(unittest.TestCase):
     class Fake:
         """Enough IMAP to exercise the lookup and the expunge path."""
 
-        def __init__(self, boxes, scan=None, search=None, search_fails=False):
+        def __init__(self, boxes, scan=None, search=None, search_fails=False,
+                     fetch=None):
             self.boxes = boxes
             self.scan = scan or []          # [(uid, raw_header_bytes)]
+            self.fetch = fetch or {}        # {uid: raw}, single-uid FETCH only
             self.search = search            # uids SEARCH returns, or None
             self.search_fails = search_fails
             self.selected = None
@@ -1731,6 +1733,9 @@ class RemoveLabel(unittest.TestCase):
                 return "OK", [b""]
             if cmd == "FETCH":
                 spec = args[0]
+                if spec in self.fetch:
+                    return "OK", [(b"%s (UID %s" % (spec.encode(), spec.encode()),
+                                   self.fetch[spec])]
                 out = []
                 for u, raw in self.scan:
                     if spec == "1:*" or spec == u:
@@ -1755,7 +1760,12 @@ class RemoveLabel(unittest.TestCase):
                 % mid).encode()
 
     def test_finds_the_copy_via_search(self):
-        f = self.Fake(self.BOXES, search=["77"])
+        # A SEARCH hit counts only once a fetch of that uid shows exactly this
+        # Message-ID, so uid 77 holds the header. It is served to that fetch
+        # alone, not to the fallback header scan, so this still proves the
+        # SEARCH route found it.
+        f = self.Fake(self.BOXES, search=["77"],
+                      fetch={"77": self._hdr("<abc@x>")})
         self.assertEqual(
             server._label_copy_uid(f, "Labels/Processed", "<abc@x>"), "77")
 
@@ -2145,6 +2155,72 @@ class EightBitHeaders(unittest.TestCase):
         out = server.tool_unsubscribe({"uid": "2"})
         self.assertIn("Email: off", out)
         self.assertIn("through an alias", out)
+
+
+class RemoveLabelExactCopy(unittest.TestCase):
+    """IMAP HEADER SEARCH matches a substring (RFC 3501), and the sender writes
+    the Message-ID. A short one such as '@' must not reach another message's
+    label copy: only a copy whose Message-ID matches exactly is dropped."""
+
+    class Substring(RemoveLabelTarget.Mailbox):
+        """The stateful fake, with SEARCH matching substrings as RFC 3501 says."""
+
+        def uid(self, cmd, *args):
+            if cmd.upper() == "SEARCH":
+                want = args[-1].strip('"')
+                box = self.boxes[self.selected]
+                return "OK", [" ".join(u for u, m in sorted(box.items())
+                                       if want in m).encode()]
+            return RemoveLabelTarget.Mailbox.uid(self, cmd, *args)
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect)
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect) = self._saved
+
+    def _remove(self, fake):
+        server.imap_connect = lambda: fake
+        return server.tool_remove_label({"uid": "500", "folder": "INBOX",
+                                         "label": "Keep", "confirmed": True})
+
+    def test_a_substring_hit_is_not_taken_for_the_copy(self):
+        fake = self.Substring({
+            "INBOX": {"500": "@"},
+            "Labels/Keep": {"1": "<stmt-2026-01@bank.example.test>",
+                            "2": "<receipt-77@shop.example.test>",
+                            "3": "@"},
+        })
+        out = self._remove(fake)
+        self.assertIn("Removed label 'Labels/Keep'", out)
+        self.assertEqual(fake.expunged, [("Labels/Keep", "3")])
+        self.assertIn("1", fake.boxes["Labels/Keep"])
+
+    def test_no_exact_copy_means_nothing_is_expunged(self):
+        fake = self.Substring({
+            "INBOX": {"500": "@"},
+            "Labels/Keep": {"1": "<stmt-2026-01@bank.example.test>"},
+        })
+        out = self._remove(fake)
+        self.assertIn("is not on uid 500", out)
+        self.assertEqual(fake.expunged, [])
+
+    def test_a_plain_server_mailbox_keeps_an_unrelated_message(self):
+        fake = self.Substring({
+            "INBOX": {"500": "@"},
+            "Projects": {"1": "<stmt-2026-01@bank.example.test>"},
+        })
+        server.imap_connect = lambda: fake
+        out = server.tool_remove_label({"uid": "500", "folder": "INBOX",
+                                        "label": "Projects", "confirmed": True})
+        self.assertIn("is not on uid 500", out)
+        self.assertEqual(fake.expunged, [])
 
 
 class DeleteLabel(unittest.TestCase):
