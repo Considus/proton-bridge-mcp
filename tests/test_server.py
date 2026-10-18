@@ -9,13 +9,17 @@ classification, the write sandbox, and the anti-exfiltration rules.
 """
 
 import email
+import imaplib
 import importlib
 import io
 import json
 import os
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.parse
@@ -2005,6 +2009,89 @@ class TlsPolicy(unittest.TestCase):
                 server._security_mode("PROTON_IMAP_SECURITY", 143)
         finally:
             os.environ.pop("PROTON_IMAP_SECURITY", None)
+
+
+class ImapDeadline(unittest.TestCase):
+    """The server is one thread. An IMAP peer that accepts the connection and
+    then says nothing must cost that one call an error, not hold every later
+    request, ping included, until the process is killed."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(server, k) for k in (
+            "USER", "IMAP_HOST", "IMAP_PORT", "STATE_FILE", "AUDIT_LOG",
+            "ATTACH_DIR", "get_password", "_SETTINGS")}
+        server.USER = "me@example.test"
+        server.IMAP_HOST = "127.0.0.1"
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        server.get_password = lambda: "test-password"
+        server._SETTINGS = {}
+        os.environ.pop("PROTON_IMAP_SECURITY", None)
+        self.peers, self.timeouts = [], []
+
+    def tearDown(self):
+        for p in self.peers:
+            p.close()
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _connect_against_silent_peer(self, port, greeting):
+        """Run imap_connect against a peer that never answers (or answers only
+        the greeting). Returns whether it was still blocked after 5s, and what
+        it raised."""
+        default = socket._GLOBAL_DEFAULT_TIMEOUT
+
+        def fake_create_connection(address, timeout=default, *a, **k):
+            client, peer = socket.socketpair()
+            self.peers.append(peer)
+            self.timeouts.append(timeout)
+            if greeting:
+                peer.sendall(b"* OK IMAP4rev1 ready\r\n")
+            if timeout is not default:
+                client.settimeout(timeout)
+            return client
+
+        out = {}
+
+        def run():
+            try:
+                out["conn"] = server.imap_connect()
+            except BaseException as e:
+                out["error"] = e
+
+        server.IMAP_PORT = port
+        with mock.patch.object(imaplib.socket, "create_connection",
+                               fake_create_connection), \
+                mock.patch.object(server, "IMAP_TIMEOUT", 0.5, create=True):
+            t = threading.Thread(target=run, daemon=True)
+            t.start()
+            t.join(5)
+            blocked = t.is_alive()
+            # Closing the peer releases a thread the unfixed code left blocked.
+            for p in self.peers:
+                p.close()
+            t.join(5)
+        return blocked, out
+
+    def _assert_bounded(self, port, greeting):
+        blocked, out = self._connect_against_silent_peer(port, greeting)
+        self.assertFalse(blocked, "imap_connect was still blocked after 5s "
+                         "with a 0.5s deadline (timeouts passed: %r)"
+                         % self.timeouts)
+        self.assertEqual(self.timeouts, [0.5])
+        self.assertIsInstance(out.get("error"), server.ToolError)
+
+    def test_silent_before_greeting_starttls(self):
+        self._assert_bounded(1143, greeting=False)
+
+    def test_silent_after_greeting_starttls(self):
+        self._assert_bounded(1143, greeting=True)
+
+    def test_silent_during_tls_handshake(self):
+        self._assert_bounded(993, greeting=False)
 
 
 class OutgoingAttachments(unittest.TestCase):

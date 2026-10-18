@@ -91,6 +91,9 @@ IMAP_HOST = _cfg("PROTON_IMAP_HOST", "127.0.0.1")
 IMAP_PORT = int(_cfg("PROTON_IMAP_PORT", "1143"))
 SMTP_HOST = _cfg("PROTON_SMTP_HOST", "127.0.0.1")
 SMTP_PORT = int(_cfg("PROTON_SMTP_PORT", "1025"))
+# Seconds any one IMAP read or write may wait. The server is one thread, so a
+# peer that goes silent would otherwise hold every later request with it.
+IMAP_TIMEOUT = float(_cfg("PROTON_IMAP_TIMEOUT_S", "60"))
 KEYCHAIN_SVC = _cfg("PROTON_KEYCHAIN_SVC", "proton-bridge-imap")
 SMTP_USER = _cfg("PROTON_SMTP_USER") or USER
 SMTP_KEYCHAIN_SVC = _cfg("PROTON_SMTP_KEYCHAIN_SVC", "proton-bridge-smtp")
@@ -404,9 +407,10 @@ def imap_connect():
     ctx = _tls_context(IMAP_HOST)
     try:
         if mode == "ssl":
-            conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=ctx)
+            conn = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, ssl_context=ctx,
+                                     timeout=IMAP_TIMEOUT)
         else:
-            conn = imaplib.IMAP4(IMAP_HOST, IMAP_PORT)
+            conn = imaplib.IMAP4(IMAP_HOST, IMAP_PORT, timeout=IMAP_TIMEOUT)
             conn.starttls(ctx)
     except ssl.SSLError as e:
         raise ToolError(_tls_help(IMAP_HOST, IMAP_PORT, mode, e))
