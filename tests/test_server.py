@@ -4475,6 +4475,14 @@ class BulkPreviewChecks(unittest.TestCase):
                                    "folder": "NoSuchSource", "dry_run": True})
         self.assertIn("Cannot open folder", str(cm.exception))
 
+    def test_bulk_move_refuses_a_missing_destination(self):
+        for extra in ({"dry_run": True}, {"confirmed": True}):
+            with self.subTest(**extra):
+                with self.assertRaises(server.ToolError) as cm:
+                    server.tool_bulk_move(dict(extra, uids=["101"],
+                                               to_folder="Trahs"))
+                self.assertIn("No folder called 'Trahs'", str(cm.exception))
+
     def test_label_previews_refuse_a_missing_label(self):
         for fn in (server.tool_bulk_apply_label, server.tool_bulk_remove_label):
             with self.subTest(tool=fn.__name__):

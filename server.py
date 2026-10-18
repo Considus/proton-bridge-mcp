@@ -2930,6 +2930,11 @@ def tool_bulk_move(args):
                         "first, then confirm.")
     dest = args["to_folder"]
 
+    def check(conn):
+        if dest not in _list_folders(conn):
+            raise ToolError("No folder called '%s'. Nothing was moved; "
+                            "list_folders shows the exact names." % dest)
+
     def one(conn, uid):
         try:
             typ, resp = conn.uid("MOVE", uid, _folder_quote(dest))
@@ -2941,7 +2946,7 @@ def tool_bulk_move(args):
                 raise RuntimeError("copy failed")
             conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
             conn.expunge()
-    return _bulk(args, "move to '%s'" % dest, one)
+    return _bulk(args, "move to '%s'" % dest, one, check=check)
 
 
 def _status_values(data):
