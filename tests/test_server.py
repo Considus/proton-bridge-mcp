@@ -134,6 +134,97 @@ class WriteSandbox(unittest.TestCase):
         self.assertEqual(server._safe_name("", "3"), "uid3_attachment.bin")
 
 
+class AttachmentSweep(unittest.TestCase):
+    """The clean-up deletes files outright, so it may only touch files the
+    server saved. The owner's own files in the same folder are not its to
+    remove, however old they are and whatever they are called."""
+
+    class Conn:
+        def logout(self):
+            pass
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.root = os.path.join(self.tmp, "attachments")
+        os.makedirs(self.root)
+        self._saved = (server.ATTACH_DIR, server.STATE_FILE, server.ATTACH_TTL,
+                       server.imap_connect, server._fetch_raw)
+        server.ATTACH_DIR = self.root
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.imap_connect = lambda: self.Conn()
+        server._fetch_raw = lambda conn, folder, uid: build_message()
+
+    def tearDown(self):
+        (server.ATTACH_DIR, server.STATE_FILE, server.ATTACH_TTL,
+         server.imap_connect, server._fetch_raw) = self._saved
+
+    def _owner_file(self, name, age):
+        path = os.path.join(self.root, name)
+        with open(path, "w") as f:
+            f.write("owner data")
+        t = server.time.time() - age
+        os.utime(path, (t, t))
+        return path
+
+    def _save(self, uid):
+        server.tool_save_attachment({"uid": uid})
+        return os.path.join(os.path.realpath(self.root), "uid%s_invoice.pdf" % uid)
+
+    def test_sweep_keeps_an_old_owner_file(self):
+        old = self._owner_file("owner-tax-return.pdf", 3600)
+        server._sweep_attachments()
+        self.assertTrue(os.path.exists(old))
+
+    def test_sweep_keeps_an_owner_file_named_like_a_saved_one(self):
+        old = self._owner_file("uid9_invoice.pdf", 3600)
+        server._sweep_attachments()
+        self.assertTrue(os.path.exists(old))
+
+    def test_purge_keeps_owner_files(self):
+        recent = self._owner_file("owner-recent.txt", 10)
+        preview = server.tool_purge_attachments({"dry_run": True})
+        self.assertNotIn("owner-recent.txt", preview)
+        out = server.tool_purge_attachments({})
+        self.assertTrue(os.path.exists(recent))
+        self.assertIn("Purged 0", out)
+
+    def test_purge_still_removes_what_the_server_saved(self):
+        saved = self._save("7")
+        recent = self._owner_file("owner-recent.txt", 10)
+        self.assertIn("uid7_invoice.pdf", server.tool_purge_attachments({"dry_run": True}))
+        self.assertIn("Purged 1", server.tool_purge_attachments({}))
+        self.assertFalse(os.path.exists(saved))
+        self.assertTrue(os.path.exists(recent))
+
+    def test_sweep_still_removes_expired_saves(self):
+        saved = self._save("7")
+        server._sweep_attachments()
+        self.assertTrue(os.path.exists(saved), "not yet past the TTL")
+        server.ATTACH_TTL = -1
+        self.assertEqual(server._sweep_attachments(), 1)
+        self.assertFalse(os.path.exists(saved))
+
+    def test_a_file_replaced_by_the_owner_is_kept(self):
+        saved = self._save("7")
+        os.remove(saved)
+        with open(saved, "w") as f:
+            f.write("the owner's own version")
+        server.tool_purge_attachments({})
+        self.assertTrue(os.path.exists(saved))
+
+    def test_any_tool_call_keeps_owner_files(self):
+        old = self._owner_file("owner-tax-return.pdf", 3600)
+        sent, real = [], server._send
+        server._send = sent.append
+        try:
+            server.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                           "params": {"name": "no_such_tool", "arguments": {}}})
+        finally:
+            server._send = real
+        self.assertIn("Unknown tool", json.dumps(sent))
+        self.assertTrue(os.path.exists(old))
+
+
 class Exfiltration(unittest.TestCase):
     """Addresses seen only in untrusted content must not be mailable, and no
     tool parameter may override that."""
