@@ -2575,6 +2575,68 @@ class RemoveLabelExactCopy(unittest.TestCase):
         self.assertEqual(fake.expunged, [])
 
 
+class RemoveLabelSharedMessageId(unittest.TestCase):
+    """A sender can reuse another message's Message-ID. When two messages in
+    the label mailbox carry it, the copy of the named message cannot be told
+    apart, so nothing is removed rather than taking whichever comes first."""
+
+    MID = "<stmt-2026-01@bank.example.test>"
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect)
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect) = self._saved
+
+    def _fake(self, label="Labels/Keep"):
+        fake = RemoveLabelExactCopy.Substring({
+            "INBOX": {"600": self.MID, "601": "<own@example.test>"},
+            label: {"1": self.MID, "2": "<own@example.test>", "4": self.MID},
+        })
+        server.imap_connect = lambda: fake
+        return fake
+
+    def test_single_removal_refuses_a_shared_message_id(self):
+        fake = self._fake()
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_remove_label({"uid": "600", "folder": "INBOX",
+                                      "label": "Keep", "confirmed": True})
+        self.assertIn("Nothing was changed", str(cm.exception))
+        self.assertEqual(fake.expunged, [])
+
+    def test_single_removal_refuses_on_a_plain_server(self):
+        fake = self._fake("Projects")
+        with self.assertRaises(server.ToolError):
+            server.tool_remove_label({"uid": "600", "folder": "INBOX",
+                                      "label": "Projects", "confirmed": True})
+        self.assertEqual(fake.expunged, [])
+
+    def test_header_scan_refuses_a_shared_message_id(self):
+        hdr = RemoveLabel._hdr(None, self.MID)
+        f = RemoveLabel.Fake(RemoveLabel.BOXES, search_fails=True,
+                             scan=[("1", hdr), ("4", hdr)])
+        with self.assertRaises(server.ToolError):
+            server._label_copy_uid(f, "Labels/Processed", self.MID)
+        self.assertEqual(f.expunged, [])
+
+    def test_bulk_removal_skips_a_shared_message_id_only(self):
+        fake = self._fake()
+        out = server.tool_bulk_remove_label(
+            {"uids": ["600", "601"], "folder": "INBOX", "label": "Keep",
+             "confirmed": True})
+        self.assertIn("from 1 of 2", out)
+        self.assertIn("failed: 600", out)
+        self.assertEqual(fake.expunged, [("Labels/Keep", "2")])
+        self.assertIn("1", fake.boxes["Labels/Keep"])
+        self.assertIn("4", fake.boxes["Labels/Keep"])
+
+
 class DeleteLabel(unittest.TestCase):
     """Labels can be deleted, folders cannot, and a server without a Labels/
     namespace is refused because there a 'label' holds the real messages."""
