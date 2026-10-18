@@ -1646,6 +1646,30 @@ def _drop_label_copy(conn, copy_uid):
         conn.expunge()
 
 
+def _resolve_label_for_removal(conn, label, folder):
+    """Removing a label expunges the copy held in the label's mailbox, so that
+    mailbox has to be a label. On Proton that means one under Labels/. A plain
+    server has no namespace, so there it means anything except the message's
+    own folder and the system mailboxes (INBOX, Trash, All Mail, Spam and so on,
+    by SPECIAL-USE flag or by name). Anything else would delete mail for good."""
+    target = _resolve_label(conn, label)
+    boxes = _list_mailboxes(conn)
+    if any(name.startswith("Labels/") for _, name in boxes):
+        if target.startswith("Labels/"):
+            return target
+    else:
+        flags = dict((name, f) for f, name in boxes).get(target, "")
+        system = target.upper() == "INBOX" or any(
+            flag in flags or target.lower() in names
+            for flag, names in _SPECIAL.values())
+        if not system and target.lower() != (folder or "").strip().lower():
+            return target
+    raise ToolError(
+        "'%s' is not a label. Removing a label expunges the copy held in the "
+        "label's mailbox, and in '%s' that would delete mail for good instead "
+        "of untagging it. Nothing was removed." % (target, target))
+
+
 def tool_remove_label(args):
     """Take a label off a message. The message stays where it is."""
     if not args.get("dry_run") and not args.get("confirmed"):
@@ -1655,7 +1679,7 @@ def tool_remove_label(args):
     uid = _uidval(args["uid"])
     conn = imap_connect()
     try:
-        target = _resolve_label(conn, args["label"])
+        target = _resolve_label_for_removal(conn, args["label"], folder)
         _select_checked(conn, folder, args.get("uidvalidity"), readonly=True)
         env = _message_id_of(conn, uid, folder)
         if args.get("dry_run"):
@@ -1693,7 +1717,7 @@ def tool_bulk_remove_label(args):
     conn = imap_connect()
     done, absent, failed = [], [], []
     try:
-        target = _resolve_label(conn, args["label"])
+        target = _resolve_label_for_removal(conn, args["label"], folder)
         # Message-IDs come from the source folder, before switching mailbox.
         _select_checked(conn, folder, args.get("uidvalidity"), readonly=True)
         mids = {}

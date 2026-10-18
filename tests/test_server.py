@@ -1127,6 +1127,149 @@ class RemoveLabel(unittest.TestCase):
         self.assertIn("Processed", out)
 
 
+class RemoveLabelTarget(unittest.TestCase):
+    """Removing a label expunges a copy, so the target has to be a label. A
+    folder, Trash or the message's own mailbox would put mail past Trash."""
+
+    class Mailbox:
+        """A stateful fake IMAP server: {mailbox: {uid: Message-ID}}."""
+
+        def __init__(self, boxes, flags=None):
+            self.boxes = boxes
+            self.flags = flags or {}
+            self.selected = None
+            self.expunged = []              # [(mailbox, uid)]
+
+        def list(self):
+            return "OK", ['(\\HasNoChildren%s) "/" "%s"'
+                          % (self.flags.get(b, ""), b) for b in self.boxes]
+
+        def select(self, mailbox, readonly=False):
+            name = mailbox.strip('"')
+            if name not in self.boxes:
+                return "NO", [b"no such mailbox"]
+            self.selected = name
+            return "OK", [str(len(self.boxes[name])).encode()]
+
+        def response(self, name):
+            return name, [b"42"]
+
+        def _raw(self, mid):
+            return ("Subject: s\r\nFrom: a@example.test\r\n"
+                    "Message-ID: %s\r\n\r\n" % mid).encode()
+
+        def uid(self, cmd, *args):
+            cmd = cmd.upper()
+            box = self.boxes[self.selected]
+            if cmd == "SEARCH":
+                want = args[-1].strip('"')
+                hits = [u for u, m in box.items() if m == want]
+                return "OK", [" ".join(hits).encode()]
+            if cmd == "FETCH":
+                spec = args[0]
+                out = [(("%s (UID %s" % (u, u)).encode(), self._raw(m))
+                       for u, m in box.items() if spec in ("1:*", u)]
+                return ("OK", out) if out else ("NO", None)
+            if cmd == "STORE":
+                return "OK", [b"done"]
+            if cmd == "EXPUNGE":
+                box.pop(args[0], None)
+                self.expunged.append((self.selected, args[0]))
+                return "OK", [b"done"]
+            return "NO", None
+
+        def expunge(self):
+            return "OK", [b"done"]
+
+        def logout(self):
+            return "BYE", []
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect)
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect) = self._saved
+
+    def _proton(self):
+        return self.Mailbox({
+            "INBOX": {"9": "<keep@example.test>"},
+            "Trash": {"5": "<t5@example.test>", "6": "<t6@example.test>"},
+            "All Mail": {"1": "<keep@example.test>"},
+            "Labels/Work": {"3": "<keep@example.test>"},
+            "Folders/Projects": {"4": "<keep@example.test>"},
+        })
+
+    def _plain(self, flags=None):
+        return self.Mailbox({
+            "INBOX": {"7": "<in7@example.test>"},
+            "Bin": {"2": "<in7@example.test>"},
+            "Trash": {"8": "<in7@example.test>"},
+            "Receipts": {"1": "<in7@example.test>"},
+        }, flags)
+
+    def _refused(self, fake, fn, args):
+        server.imap_connect = lambda: fake
+        args = dict(args, confirmed=True)
+        with self.assertRaises(server.ToolError):
+            fn(args)
+        self.assertEqual(fake.expunged, [], "nothing may be expunged")
+
+    def test_trash_as_the_label_is_refused(self):
+        self._refused(self._proton(), server.tool_remove_label,
+                      {"uid": "5", "folder": "Trash", "label": "Trash"})
+
+    def test_bulk_trash_as_the_label_is_refused(self):
+        self._refused(self._proton(), server.tool_bulk_remove_label,
+                      {"uids": ["5", "6"], "folder": "Trash", "label": "Trash"})
+
+    def test_a_proton_folder_as_the_label_is_refused(self):
+        self._refused(self._proton(), server.tool_remove_label,
+                      {"uid": "9", "folder": "INBOX",
+                       "label": "Folders/Projects"})
+
+    def test_all_mail_as_the_label_is_refused(self):
+        self._refused(self._proton(), server.tool_remove_label,
+                      {"uid": "9", "folder": "INBOX", "label": "All Mail"})
+
+    def test_the_source_folder_as_the_label_is_refused(self):
+        self._refused(self._plain(), server.tool_remove_label,
+                      {"uid": "7", "folder": "INBOX", "label": "INBOX"})
+
+    def test_trash_on_a_plain_server_is_refused(self):
+        self._refused(self._plain(), server.tool_bulk_remove_label,
+                      {"uids": ["7"], "folder": "INBOX", "label": "Trash"})
+
+    def test_a_special_use_mailbox_under_another_name_is_refused(self):
+        self._refused(self._plain({"Bin": " \\Trash"}),
+                      server.tool_remove_label,
+                      {"uid": "7", "folder": "INBOX", "label": "Bin"})
+
+    def test_a_real_label_is_still_removed(self):
+        fake = self._proton()
+        server.imap_connect = lambda: fake
+        out = server.tool_remove_label({"uid": "9", "folder": "INBOX",
+                                        "label": "Work", "confirmed": True})
+        self.assertIn("Removed label 'Labels/Work'", out)
+        self.assertEqual(fake.expunged, [("Labels/Work", "3")])
+        self.assertIn("9", fake.boxes["INBOX"])
+
+    def test_a_plain_server_label_mailbox_is_still_removed(self):
+        fake = self._plain()
+        server.imap_connect = lambda: fake
+        out = server.tool_bulk_remove_label(
+            {"uids": ["7"], "folder": "INBOX", "label": "Receipts",
+             "confirmed": True})
+        self.assertIn("from 1 of 1", out)
+        self.assertEqual(fake.expunged, [("Receipts", "1")])
+        self.assertIn("7", fake.boxes["INBOX"])
+
+
 class DeleteLabel(unittest.TestCase):
     """Labels can be deleted, folders cannot, and a server without a Labels/
     namespace is refused because there a 'label' holds the real messages."""
