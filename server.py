@@ -1477,6 +1477,38 @@ def _drafts_folder_of(args, conn):
     return args.get("folder") or _find_drafts_folder(conn)
 
 
+def _expunge_only(conn, uid, copied_to=None):
+    """Expunge uid, already flagged \\Deleted, from the selected mailbox and
+    nothing else. UID EXPUNGE (RFC 4315) touches only this uid. A bare EXPUNGE
+    removes every message flagged \\Deleted, including mail another client
+    marked and could still undelete, so if any other uid here is flagged the
+    target's flag is cleared and the call refused instead."""
+    try:
+        typ, _ = conn.uid("EXPUNGE", uid)
+    except Exception:
+        typ = "NO"
+    if typ == "OK":
+        return
+    try:
+        typ, data = conn.uid("SEARCH", None, "DELETED")
+        others = [u for u in (data[0] or b"").split()
+                  if u.decode() != str(uid)] if typ == "OK" else []
+    except Exception:
+        others = []
+    if others:
+        try:
+            conn.uid("STORE", uid, "-FLAGS", r"(\Deleted)")
+        except Exception:
+            pass
+        raise ToolError(
+            "uid %s was left in place: this server has no UID EXPUNGE, and "
+            "other messages here are already marked deleted, which a plain "
+            "EXPUNGE would remove permanently.%s"
+            % (uid, " A copy is already in '%s'." % copied_to
+               if copied_to else ""))
+    conn.expunge()
+
+
 def _bin_to_trash(conn, uid, trash):
     """Move uid from the selected folder to Trash. Returns False, with the
     message left where it was, if Trash did not take it. The original is
@@ -1494,7 +1526,7 @@ def _bin_to_trash(conn, uid, trash):
     if typ != "OK":
         return False
     conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-    conn.expunge()
+    _expunge_only(conn, uid, trash)
     return True
 
 
@@ -1596,7 +1628,7 @@ def tool_delete_draft(args):
             if typ != "OK":
                 raise ToolError("Could not move the draft to Trash: %s" % resp)
             conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-            conn.expunge()
+            _expunge_only(conn, uid, trash)
         return "Draft uid %s moved from '%s' to '%s'." % (uid, folder, trash)
     finally:
         try:
@@ -1946,18 +1978,11 @@ def _label_copy_uid(conn, label_mailbox, message_id):
 
 
 def _drop_label_copy(conn, copy_uid):
-    """Expunge one copy out of the currently-selected label mailbox. UID EXPUNGE
-    (RFC 4315) touches only this uid; a bare EXPUNGE would take anything else in
-    the mailbox already flagged \\Deleted with it, so it's the fallback."""
+    """Expunge one copy out of the currently-selected label mailbox."""
     typ, resp = conn.uid("STORE", copy_uid, "+FLAGS", r"(\Deleted)")
     if typ != "OK":
         raise ToolError("Could not flag the label copy for removal: %s" % resp)
-    try:
-        typ, _ = conn.uid("EXPUNGE", copy_uid)
-    except imaplib.IMAP4.error:
-        typ = "NO"
-    if typ != "OK":
-        conn.expunge()
+    _expunge_only(conn, copy_uid)
 
 
 def _resolve_label_for_removal(conn, label, folder):
@@ -2104,7 +2129,7 @@ def tool_move_to_folder(args):
                 raise ToolError("Move to '%s' failed: %s. Try list_folders."
                                 % (dest, resp))
             conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-            conn.expunge()
+            _expunge_only(conn, uid, dest)
         return "Moved uid %s from '%s' to '%s'." % (uid, folder, dest)
     finally:
         try:
@@ -3020,7 +3045,7 @@ def tool_bulk_move(args):
             if typ != "OK":
                 raise RuntimeError("copy failed")
             conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-            conn.expunge()
+            _expunge_only(conn, uid, dest)
     return _bulk(args, "move to '%s'" % dest, one, check=check)
 
 

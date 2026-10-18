@@ -1892,6 +1892,222 @@ class DraftBinningUidValidity(unittest.TestCase):
         self.assertNotIn("previous version is in Trash", text)
 
 
+class ExpungeOnlyTheTarget(unittest.TestCase):
+    """Without UID MOVE, moving or binning a message ends in COPY, a \\Deleted
+    flag and an expunge. A bare EXPUNGE removes every message in the folder
+    flagged \\Deleted, so mail another client marked for deletion, and could
+    still undelete, would be gone for good. Only the target may go."""
+
+    DELETED = "\\Deleted"
+
+    class Server:
+        """RFC 3501 mailboxes. UID MOVE and UID EXPUNGE are switchable."""
+
+        def __init__(self, test):
+            self.t = test
+            self.selected = None
+
+        def list(self):
+            special = {"Drafts": "\\Drafts", "Trash": "\\Trash"}
+            return "OK", ['(\\HasNoChildren %s) "/" "%s"'
+                          % (special.get(b, ""), b) for b in self.t.boxes]
+
+        def select(self, mailbox, readonly=False):
+            self.selected = mailbox.strip('"')
+            return "OK", [b"1"]
+
+        def response(self, name):
+            return name, [b"100"]
+
+        def _add(self, box, raw, flags):
+            uid = str(max([int(u) for u in box] + [0]) + 1)
+            box[uid] = [raw, set(flags)]
+            return uid
+
+        def append(self, mailbox, flags, date, raw):
+            self._add(self.t.boxes[mailbox.strip('"')], raw, ())
+            return "OK", [b"done"]
+
+        def uid(self, cmd, *args):
+            cmd = cmd.upper()
+            box = self.t.boxes[self.selected]
+            self.t.sent_cmds.append("UID " + cmd)
+            if cmd == "FETCH":
+                if args[0] not in box:
+                    return "OK", [None]
+                return "OK", [(b"1 (UID %s BODY[] {1}" % args[0].encode(),
+                               box[args[0]][0])]
+            if cmd == "STORE":
+                uid, op, flags = args
+                for f in flags.strip("()").split():
+                    if op.startswith("+"):
+                        box[uid][1].add(f)
+                    else:
+                        box[uid][1].discard(f)
+                return "OK", [b"done"]
+            if cmd == "SEARCH":
+                if args[-1].upper() != "DELETED":
+                    return "NO", [b"unsupported in this double"]
+                hits = sorted((u for u, m in box.items()
+                               if self.t.DELETED in m[1]), key=int)
+                return "OK", [" ".join(hits).encode()]
+            if cmd == "COPY" or cmd == "MOVE":
+                if cmd == "MOVE" and not self.t.has_move:
+                    raise server.imaplib.IMAP4.error("BAD unknown command MOVE")
+                raw, flags = box[args[0]]
+                self._add(self.t.boxes[args[1].strip('"')], raw, flags)
+                if cmd == "MOVE":
+                    del box[args[0]]
+                return "OK", [b"done"]
+            if cmd == "EXPUNGE":
+                if not self.t.has_uidplus:
+                    raise server.imaplib.IMAP4.error("BAD unknown command UID")
+                if self.t.DELETED in box[args[0]][1]:
+                    del box[args[0]]
+                return "OK", [b"done"]
+            raise AssertionError("unexpected UID %s" % cmd)
+
+        def expunge(self):
+            self.t.sent_cmds.append("EXPUNGE")
+            box = self.t.boxes[self.selected]
+            for uid in [u for u, m in box.items() if self.t.DELETED in m[1]]:
+                del box[uid]
+            return "OK", [b"done"]
+
+        def logout(self):
+            pass
+
+    RAW = (b"From: owner@example.test\r\nTo: friend@example.test\r\n"
+           b"Subject: hello\r\n\r\nbody\r\n")
+    OTHER = (b"From: someone@example.test\r\nTo: owner@example.test\r\n"
+             b"Subject: marked deleted elsewhere\r\n\r\nkeep me\r\n")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(server, k) for k in (
+            "USER", "ALIAS_FROM", "STATE_FILE", "AUDIT_LOG", "AUDIT_ENABLED",
+            "ATTACH_DIR", "imap_connect", "_smtp_send")}
+        server.USER, server.ALIAS_FROM = "owner@example.test", ""
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.AUDIT_ENABLED = False
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        self.env = mock.patch.dict(os.environ)
+        self.env.start()
+        os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+        self._tainted = set(server._TAINTED)
+        server._TAINTED.clear()
+        self.has_move, self.has_uidplus = False, False
+        self.sent_cmds, self.sent = [], []
+        self.boxes = {
+            "INBOX": {"10": [self.RAW, set()],
+                      "11": [self.OTHER, {self.DELETED}]},
+            "Archive": {},
+            "Drafts": {"5": [self.RAW, set()],
+                       "6": [self.OTHER, {self.DELETED}]},
+            "Labels/X": {"20": [self.RAW, set()],
+                         "21": [self.OTHER, {self.DELETED}]},
+            "Trash": {},
+        }
+        server._smtp_send = self.sent.append
+        server.imap_connect = lambda: self.Server(self)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+        self.env.stop()
+        server._TAINTED.clear()
+        server._TAINTED.update(self._tainted)
+
+    def _refusal(self, fn, arg):
+        try:
+            fn(arg)
+        except server.ToolError as e:
+            return str(e)
+        return None
+
+    def assertOtherKept(self, folder, uid):
+        self.assertIn(uid, self.boxes[folder],
+                      "uid %s in '%s' was expunged, commands %r"
+                      % (uid, folder, self.sent_cmds))
+        self.assertEqual(self.boxes[folder][uid],
+                         [self.OTHER, {self.DELETED}])
+
+    def assertTargetKept(self, folder, uid):
+        self.assertIn(uid, self.boxes[folder])
+        self.assertNotIn(self.DELETED, self.boxes[folder][uid][1],
+                         "the refused target is left flagged for deletion")
+
+    def test_move_to_folder_keeps_other_deleted_mail(self):
+        err = self._refusal(server.tool_move_to_folder, {
+            "uid": "10", "folder": "INBOX", "to_folder": "Archive"})
+        self.assertOtherKept("INBOX", "11")
+        self.assertTargetKept("INBOX", "10")
+        self.assertEqual(len(self.boxes["Archive"]), 1)
+        self.assertNotIn("EXPUNGE", self.sent_cmds)
+        self.assertIsNotNone(err, "a refused move must not report success")
+        self.assertIn("Archive", err)
+
+    def test_bulk_move_keeps_other_deleted_mail(self):
+        out = server.tool_bulk_move({"uids": ["10"], "folder": "INBOX",
+                                     "to_folder": "Archive", "confirmed": True})
+        self.assertOtherKept("INBOX", "11")
+        self.assertTargetKept("INBOX", "10")
+        self.assertIn("0 of 1", out)
+        self.assertIn("failed: 10", out)
+
+    def test_delete_draft_keeps_other_deleted_mail(self):
+        err = self._refusal(server.tool_delete_draft, {
+            "uid": "5", "folder": "Drafts", "confirmed": True})
+        self.assertOtherKept("Drafts", "6")
+        self.assertTargetKept("Drafts", "5")
+        self.assertIsNotNone(err, "a refused delete must not report success")
+
+    def test_update_draft_keeps_other_deleted_mail(self):
+        out = server.tool_update_draft({"uid": "5", "folder": "Drafts",
+                                        "body": "new body"})
+        self.assertOtherKept("Drafts", "6")
+        self.assertTargetKept("Drafts", "5")
+        self.assertIn("still in 'Drafts' as uid 5", out)
+
+    def test_send_draft_keeps_other_deleted_mail(self):
+        out = server.tool_send_draft({"uid": "5", "folder": "Drafts",
+                                      "confirmed": True})
+        self.assertEqual(len(self.sent), 1)
+        self.assertOtherKept("Drafts", "6")
+        self.assertTargetKept("Drafts", "5")
+        self.assertIn("WAS SENT", out)
+        self.assertIn("still in 'Drafts' as uid 5", out)
+
+    def test_drop_label_copy_keeps_other_deleted_mail(self):
+        conn = self.Server(self)
+        conn.select("Labels/X")
+        err = self._refusal(lambda uid: server._drop_label_copy(conn, uid), "20")
+        self.assertOtherKept("Labels/X", "21")
+        self.assertTargetKept("Labels/X", "20")
+        self.assertIsNotNone(err, "a refused removal must not report success")
+
+    def test_uid_expunge_removes_only_the_target(self):
+        self.has_uidplus = True
+        server.tool_move_to_folder({"uid": "10", "folder": "INBOX",
+                                    "to_folder": "Archive"})
+        self.assertNotIn("10", self.boxes["INBOX"])
+        self.assertOtherKept("INBOX", "11")
+        self.assertNotIn("EXPUNGE", self.sent_cmds)
+
+    def test_bare_expunge_still_runs_when_the_target_is_the_only_one(self):
+        # Positive control: the double does expunge, and a server without
+        # UIDPLUS can still move mail when nothing else is marked deleted.
+        del self.boxes["INBOX"]["11"]
+        out = server.tool_move_to_folder({"uid": "10", "folder": "INBOX",
+                                          "to_folder": "Archive"})
+        self.assertEqual(self.boxes["INBOX"], {})
+        self.assertEqual(len(self.boxes["Archive"]), 1)
+        self.assertIn("EXPUNGE", self.sent_cmds)
+        self.assertIn("Moved uid 10", out)
+
+
 class Unsubscribe(unittest.TestCase):
     def _msg(self, unsub, extra=""):
         return email.message_from_string(
