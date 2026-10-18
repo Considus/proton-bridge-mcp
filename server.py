@@ -1293,9 +1293,10 @@ def _do_reply(args, reply_all):
         return ("Draft reply saved to '%s'. Nothing sent.\n  To: %s\n  Cc: %s\n"
                 "  Subject: %s%s" % (drafts, to, cc or "(none)", reply["Subject"], note))
 
-    _smtp_send(reply)
-    return ("Reply sent.\n  From: %s\n  To: %s\n  Cc: %s\n  Subject: %s%s"
-            % (from_address or USER, to, cc or "(none)", reply["Subject"], note))
+    refused = _smtp_send(reply)
+    return _refused_note(refused) + (
+        "Reply sent.\n  From: %s\n  To: %s\n  Cc: %s\n  Subject: %s%s"
+        % (from_address or USER, to, cc or "(none)", reply["Subject"], note))
 
 
 def tool_reply(args):
@@ -1498,7 +1499,13 @@ def tool_send_draft(args):
     _check_recipients(to, cc, bcc)
     if args.get("dry_run"):
         return _dry("send draft uid %s" % uid, _preview(msg))
-    _smtp_send(msg)
+    refused = _smtp_send(msg)
+    if refused:
+        return (_refused_note(refused) + "Draft sent to the other recipients "
+                "only. The draft was kept in '%s' as uid %s, not moved to "
+                "Trash.\n  From: %s\n  To: %s\n  Subject: %s"
+                % (folder, uid, _decode(msg.get("From")), to,
+                   _decode(msg.get("Subject"))))
 
     # The message has gone. A cleanup failure from here on must not read as a
     # failed send, or a retry sends it twice.
@@ -1622,10 +1629,11 @@ def tool_unsubscribe(args):
     if args.get("dry_run"):
         return _dry("send an unsubscribe for uid %s" % uid,
                     _preview(out) + (["", "Caveat: " + advice[-1]] if aliased else []))
-    _smtp_send(out)
-    return ("Unsubscribe request sent to %s (subject: %s).%s"
-            % (target, subject,
-               "\n\nWorth knowing: " + advice[-1] if aliased else ""))
+    refused = _smtp_send(out)
+    return _refused_note(refused) + (
+        "Unsubscribe request sent to %s (subject: %s).%s"
+        % (target, subject,
+           "\n\nWorth knowing: " + advice[-1] if aliased else ""))
 
 
 def tool_mark(args):
@@ -1933,7 +1941,21 @@ def tool_move_to_folder(args):
             pass
 
 
+def _refused_note(refused):
+    """Name the recipients the mail server refused while it took the message
+    for the rest. It goes at the start of the result, because the audit
+    records only the first line."""
+    if not refused:
+        return ""
+    return "NOT sent to %s; the mail server refused delivery. " % ", ".join(
+        "%s (%s %s)" % (addr, code, " ".join(
+            (resp or b"").decode("utf-8", "replace").split())[:120])
+        for addr, (code, resp) in sorted(refused.items()))
+
+
 def _smtp_send(msg):
+    """Send msg. Returns the recipients the server refused, which smtplib
+    reports only when it took the message for at least one other."""
     mode = _security_mode("PROTON_SMTP_SECURITY", SMTP_PORT)
     ctx = _tls_context(SMTP_HOST)
     smtp_user, smtp_pw = smtp_credentials()
@@ -1956,7 +1978,7 @@ def _smtp_send(msg):
                 raise ToolError(_tls_help(SMTP_HOST, SMTP_PORT, mode, e))
             server.ehlo()
         server.login(smtp_user, smtp_pw)
-        server.send_message(msg)
+        refused = server.send_message(msg)
     except BaseException:
         server.close()
         raise
@@ -1966,6 +1988,7 @@ def _smtp_send(msg):
         server.quit()
     except Exception:
         server.close()
+    return refused
 
 
 def tool_send(args):
@@ -1989,8 +2012,8 @@ def tool_send(args):
                        from_address=from_address, attachments=files)
     if args.get("dry_run"):
         return _dry("send this message", _preview(msg, files=files))
-    _smtp_send(msg)
-    return "Sent from %s to %s (subject: %s)." % (
+    refused = _smtp_send(msg)
+    return _refused_note(refused) + "Sent from %s to %s (subject: %s)." % (
         from_address or USER, to, args.get("subject", ""))
 
 
@@ -2036,8 +2059,8 @@ def tool_forward(args):
                        subtype="rfc822", filename="original.eml")
     if args.get("dry_run"):
         return _dry("forward uid %s" % uid, _preview(fwd))
-    _smtp_send(fwd)
-    return "Forwarded uid %s to %s." % (uid, to)
+    refused = _smtp_send(fwd)
+    return _refused_note(refused) + "Forwarded uid %s to %s." % (uid, to)
 
 
 # ----------------------------------------------------------------------------
