@@ -130,11 +130,9 @@ def store_password(user, password, service=KEYCHAIN_SVC):
     on Windows, Secret Service/KWallet on Linux. Never touches disk in plaintext.
 
     keyring is preferred wherever it's importable because it calls the platform
-    credential API directly, keeping the password out of the process argument
-    list. Stock macOS has no keyring, so we fall back to the `security` tool;
-    its `-w` places the secret in argv for the lifetime of that one short-lived
-    call — a known, accepted trade-off on a single-user machine, and the reason
-    keyring is tried first."""
+    credential API directly. Stock macOS has no keyring, so we fall back to the
+    `security` tool. Any local account can read a process's arguments with ps,
+    so the command goes in on stdin (`security -i`), never in argv."""
     try:
         import keyring
         keyring.set_password(service, user, password)
@@ -142,9 +140,18 @@ def store_password(user, password, service=KEYCHAIN_SVC):
     except Exception:
         pass
     if sys.platform == "darwin":
+        values = (user, service, password)
+        if any(c in v for v in values for c in "\r\n\0"):
+            # A line break would end this command and start another.
+            raise RuntimeError("The password or username contains a line "
+                               "break, which the Keychain tool can't take.")
+
+        def q(v):  # security -i reads "..." with \" and \\ escapes
+            return '"%s"' % v.replace("\\", "\\\\").replace('"', '\\"')
         r = subprocess.run(
-            ["security", "add-generic-password", "-U", "-a", user,
-             "-s", service, "-w", password],
+            ["security", "-i"],
+            input="add-generic-password -U -a %s -s %s -w %s\n"
+                  % tuple(q(v) for v in values),
             capture_output=True, text=True)
         if r.returncode == 0:
             return "secure credential store"

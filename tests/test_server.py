@@ -19,9 +19,11 @@ import tempfile
 import unittest
 import urllib.parse
 from email.message import EmailMessage
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server  # noqa: E402
+import setup  # noqa: E402
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SERVER_PY = os.path.join(HERE, "server.py")
@@ -1696,6 +1698,42 @@ class SetupUpdateMode(unittest.TestCase):
         self.assertFalse("Setup complete" in page, "settings.json was overwritten")
         with open(self.settings) as f:
             self.assertEqual(f.read(), '{"PROTON_MODE": "organise",')
+
+
+class SetupCredentialStore(unittest.TestCase):
+    """setup.py's macOS route when keyring is missing. The real `security` tool
+    never runs here: subprocess.run is swapped for a recorder."""
+
+    PASSWORD = 'fake pw "with" quotes\\ and spaces'
+
+    def _store_without_keyring(self, password, service=setup.KEYCHAIN_SVC):
+        self.calls = []
+
+        def fake_run(args, **kwargs):
+            self.calls.append((list(args), kwargs))
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        with mock.patch.dict(sys.modules, {"keyring": None}), \
+                mock.patch.object(setup.sys, "platform", "darwin"), \
+                mock.patch.object(setup.subprocess, "run", side_effect=fake_run):
+            return setup.store_password("me@example.test", password, service)
+
+    def test_password_never_reaches_a_command_line(self):
+        # Any local account can list another process's arguments with ps, so
+        # the Bridge and SMTP passwords must not be one of them.
+        for service in (setup.KEYCHAIN_SVC, setup.SMTP_KEYCHAIN_SVC):
+            result = self._store_without_keyring(self.PASSWORD, service)
+            self.assertEqual(result, "secure credential store")
+            self.assertTrue(self.calls, "the security tool was never called")
+            for args, _ in self.calls:
+                self.assertNotIn(self.PASSWORD, " ".join(args))
+
+    def test_a_line_break_cannot_add_a_second_command(self):
+        # The password goes to `security` as a line of input, so a line break
+        # in it would start another command. Refuse before anything runs.
+        with self.assertRaises(RuntimeError):
+            self._store_without_keyring("pw\ndelete-keychain")
+        self.assertEqual(self.calls, [])
 
 
 def rpc(requests, env=None):
