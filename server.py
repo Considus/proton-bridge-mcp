@@ -1216,11 +1216,16 @@ def tool_create_draft(args):
     cc = args.get("cc", "")
     subject = args.get("subject", "")
     body = args.get("body", "")
+    from_address = args.get("from_address")
+    # A draft's headers count as correspondents once it is read back, so it
+    # must not carry an address send would refuse.
+    _check_sender(from_address)
+    _check_recipients(to, cc)
     files = _load_attachments(args)
     msg = _new_message(to, cc, subject, body,
                        in_reply_to=args.get("in_reply_to"),
                        references=args.get("references"),
-                       from_address=args.get("from_address"), attachments=files)
+                       from_address=from_address, attachments=files)
     if args.get("dry_run"):
         return _dry("save this draft", _preview(msg, files=files))
     conn = imap_connect()
