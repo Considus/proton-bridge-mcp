@@ -3711,6 +3711,68 @@ class SaveAttachmentNoOverwrite(unittest.TestCase):
         self._check(server._persist_dir(), "Contract.pdf", "CONTRACT.PDF", True)
 
 
+class SafeNameKeepsExtension(unittest.TestCase):
+    """The length cap on a saved name must shorten the stem, never cut off the
+    declared extension, so the type on disk is the type list_attachments
+    showed. A sender can pad a name so the cut leaves an inner '.exe'."""
+
+    PADDED = {
+        "A" * 116 + ".exe.pdf": ".pdf",
+        "R" * 115 + ".docm.txt": ".txt",
+        "T" * 111 + ".terminal.txt": ".txt",
+        "C" * 112 + ".command.pdf": ".pdf",
+    }
+
+    def test_names_under_the_cap_are_unchanged(self):
+        name = "notes." + "a" * 20
+        self.assertEqual(server._safe_name(name, 1), "uid1_" + name)
+
+    def test_long_names_keep_the_declared_extension(self):
+        for name, ext in self.PADDED.items():
+            got = server._safe_name(name, "42")
+            self.assertEqual(os.path.splitext(got)[1], ext, got)
+            self.assertLessEqual(len(got), len("uid42_") + 120, got)
+
+    def test_short_names_are_unchanged(self):
+        self.assertEqual(server._safe_name("invoice.pdf", "42"),
+                         "uid42_invoice.pdf")
+
+    def test_save_attachment_writes_the_declared_extension(self):
+        tmp = tempfile.mkdtemp()
+        saved = (server.imap_connect, server._fetch_raw, server.ATTACH_DIR,
+                 server.STATE_FILE, server.AUDIT_LOG)
+        self.addCleanup(lambda: (
+            setattr(server, "imap_connect", saved[0]),
+            setattr(server, "_fetch_raw", saved[1]),
+            setattr(server, "ATTACH_DIR", saved[2]),
+            setattr(server, "STATE_FILE", saved[3]),
+            setattr(server, "AUDIT_LOG", saved[4])))
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        msg = EmailMessage()
+        msg["From"] = "sender@example.test"
+        msg["To"] = "me@example.test"
+        msg["Subject"] = "Invoice"
+        msg.set_content("See attached.")
+        msg.add_attachment(b"MZ-dummy-bytes", maintype="text", subtype="plain",
+                           filename="A" * 116 + ".exe.pdf")
+
+        class FakeConn:
+            def logout(self):
+                pass
+
+        server.imap_connect = lambda *a, **k: FakeConn()
+        server._fetch_raw = lambda conn, folder, uid: msg.as_bytes()
+        out = server.tool_save_attachment({"uid": "42", "folder": "Spam"})
+        dest = os.path.realpath(server.ATTACH_DIR)
+        files = [n for n in os.listdir(dest)
+                 if os.path.isfile(os.path.join(dest, n))]
+        self.assertEqual(len(files), 1, files)
+        self.assertTrue(files[0].endswith(".pdf"), files[0])
+        self.assertNotIn(".exe (", out)
+
+
 
 class ArgumentTypes(unittest.TestCase):
     """tools/call arguments must have the types the tool declares. A list in

@@ -2328,14 +2328,21 @@ _WIN_RESERVED = {"con", "prn", "aux", "nul"} | \
 
 def _safe_name(filename, uid):
     """Attachment filenames are attacker-controlled. Strip every path component,
-    control characters, leading dots/dashes, and cap the length."""
+    control characters, leading dots/dashes, and cap the length. The cap
+    shortens the stem and keeps the final extension, so padding cannot cut
+    'x.exe.pdf' down to 'x.exe'."""
     name = os.path.basename(filename or "")
     name = re.sub(r"[/\\]", "_", name)
     name = re.sub(r"[\x00-\x1f\x7f]", "", name)
     name = re.sub(r"\s+", " ", name).strip().lstrip(".-")
     if os.path.splitext(name)[0].lower() in _WIN_RESERVED:
         name = "_" + name
-    return "uid%s_%s" % (uid, (name or "attachment.bin")[:120])
+    name = name or "attachment.bin"
+    if len(name) > 120:
+        stem, ext = os.path.splitext(name)
+        ext = ext[:16]
+        name = stem[:120 - len(ext)] + ext
+    return "uid%s_%s" % (uid, name)
 
 
 def _resolve_dest(dest_dir):
