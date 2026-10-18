@@ -637,12 +637,39 @@ def _extract_body(msg_bytes, limit=20000):
     return body
 
 
+# Mail HTML is hostile, so every pattern here runs in linear time: one search
+# for the opener, then one for its closer. re.ASCII keeps re.I from folding
+# 'ſcript' or 'scrıpt' into 'script', which would miss the lookup below.
+_SCRIPT_STYLE_OPEN = re.compile(r"<(script|style)[^<>]*>", re.I | re.A)
+_SCRIPT_STYLE_CLOSE = {t: re.compile(r"</%s>" % t, re.I | re.A)
+                       for t in ("script", "style")}
+
+
 def _strip_html(s):
-    import re
-    s = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", s)
+    out, i, unclosed = [], 0, set()
+    while True:
+        m = _SCRIPT_STYLE_OPEN.search(s, i)
+        if not m:
+            break
+        tag = m.group(1).lower()
+        c = None if tag in unclosed else _SCRIPT_STYLE_CLOSE[tag].search(s, m.end())
+        if c:
+            out.append(s[i:m.start()])
+        else:
+            # No closer anywhere after this one, so none after a later one
+            # either: keep the text, as before, and stop searching for it.
+            unclosed.add(tag)
+            out.append(s[i:m.end()])
+            c = m
+        i = c.end()
+    out.append(s[i:])
+    s = "".join(out)
     s = re.sub(r"(?i)<br\s*/?>", "\n", s)
     s = re.sub(r"(?i)</p>", "\n\n", s)
-    s = re.sub(r"(?s)<[^>]+>", "", s)
+    # Text after the last '>' holds no tag; leaving it out of the scan stops a
+    # run of unclosed '<' costing quadratic time.
+    end = s.rfind(">") + 1
+    s = re.sub(r"<[^>]+>", "", s[:end]) + s[end:]
     import html as _h
     s = _h.unescape(s)
     s = re.sub(r"\n{3,}", "\n\n", s)
