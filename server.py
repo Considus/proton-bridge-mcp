@@ -2458,7 +2458,7 @@ def tool_list_attachments(args):
     include_noise = bool(args.get("include_inline"))
     conn = imap_connect()
     try:
-        raw = _fetch_raw(conn, folder, uid)
+        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
     finally:
         try:
             conn.logout()
@@ -2492,7 +2492,7 @@ def tool_read_attachment(args):
     want = args.get("filename")
     conn = imap_connect()
     try:
-        raw = _fetch_raw(conn, folder, uid)
+        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
     finally:
         try:
             conn.logout()
@@ -2600,7 +2600,7 @@ def tool_save_attachment(args):
     dest = _persist_dir() if persist else _resolve_dest(args.get("dest_dir"))
     conn = imap_connect()
     try:
-        raw = _fetch_raw(conn, folder, uid)
+        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
     finally:
         try:
             conn.logout()
