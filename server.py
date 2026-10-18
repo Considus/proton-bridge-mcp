@@ -2886,14 +2886,28 @@ def tool_bulk_move(args):
     return _bulk(args, "move to '%s'" % dest, one)
 
 
+def _status_values(data):
+    """Counters from a STATUS reply, read only from its trailing attribute list.
+    The reply starts with the mailbox name the server echoes back, and a name
+    can itself read 'MESSAGES 0' or 'UIDNEXT 999999', so it is never searched."""
+    if not data or not isinstance(data[0], bytes):
+        return {}
+    m = re.search(rb"\(([^()]*)\)\s*$", data[0])
+    if not m:
+        return {}
+    toks = m.group(1).decode("ascii", "replace").split()
+    return dict((k.upper(), int(v)) for k, v in zip(toks[0::2], toks[1::2])
+                if v.isdigit())
+
+
 def _mailbox_head(conn, folder):
     typ, data = conn.status(_folder_quote(folder), "(UIDNEXT)")
     if typ != "OK" or not data or not data[0]:
         raise ToolError("Cannot read UIDNEXT for '%s'." % folder)
-    m = re.search(r"UIDNEXT\s+(\d+)", data[0].decode("utf-8", "replace"))
-    if not m:
+    nxt = _status_values(data).get("UIDNEXT")
+    if nxt is None:
         raise ToolError("Unexpected STATUS response for '%s'." % folder)
-    return int(m.group(1)) - 1
+    return nxt - 1
 
 
 def tool_poll_mailbox(args):
@@ -3109,11 +3123,8 @@ def _label_message_count(conn, target):
     anything happens rather than discovered afterwards."""
     try:
         typ, data = conn.status(_folder_quote(target), "(MESSAGES)")
-        if typ == "OK" and data and data[0]:
-            m = re.search(r"MESSAGES\s+(\d+)",
-                          data[0].decode("utf-8", "replace"))
-            if m:
-                return int(m.group(1))
+        if typ == "OK":
+            return _status_values(data).get("MESSAGES")
     except Exception:
         pass
     return None

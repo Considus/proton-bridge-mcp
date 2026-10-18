@@ -2993,6 +2993,63 @@ class DeleteLabelKeepsMail(unittest.TestCase):
         self.assertEqual(host.deleted, ["Labels/Old"])
 
 
+class StatusEchoedName(unittest.TestCase):
+    """A STATUS reply starts with the mailbox name the server echoes back, and
+    that name can itself read 'MESSAGES 0' or 'UIDNEXT 999999'. The counters
+    come only from the attribute list after it."""
+
+    class Labels(DeleteLabelKeepsMail.Host):
+        def status(self, mailbox, what):
+            name = self._name(mailbox)
+            return "OK", [b'"%s" (MESSAGES %d)'
+                          % (name.encode(), len(self.boxes.get(name, [])))]
+
+    class Watched(AckOnlyIssuedCheckpoints.Mailbox):
+        def status(self, mailbox, what):
+            nxt = (max(self.uids) if self.uids else 0) + 1
+            return "OK", [b"%s (UIDNEXT %d)" % (mailbox.encode(), nxt)]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (server.imap_connect, server.AUDIT_LOG, server.STATE_FILE)
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+
+    def tearDown(self):
+        server.imap_connect, server.AUDIT_LOG, server.STATE_FILE = self._saved
+
+    def test_message_count_ignores_the_echoed_name(self):
+        hdr = DeleteLabelKeepsMail._hdr("<m@mail.example.test>")
+        host = self.Labels({"Labels/Q3 MESSAGES 0": [hdr] * 250,
+                            "Labels/XMESSAGES 9": [hdr] * 30})
+        self.assertEqual(
+            server._label_message_count(host, "Labels/Q3 MESSAGES 0"), 250)
+        self.assertEqual(
+            server._label_message_count(host, "Labels/XMESSAGES 9"), 30)
+
+    def test_name_reading_messages_0_does_not_skip_the_only_copies_check(self):
+        host = self.Labels({
+            "INBOX": [], "Labels": [],
+            "Labels/Q3 MESSAGES 0": [
+                DeleteLabelKeepsMail._hdr("<c%d@mail.example.test>" % i)
+                for i in range(3)],
+        })
+        server.imap_connect = lambda: host
+        with self.assertRaises(server.ToolError):
+            server.tool_delete_label({"label": "Q3 MESSAGES 0",
+                                      "confirmed": True})
+        self.assertEqual(host.deleted, [])
+
+    def test_poll_ignores_a_uidnext_in_the_folder_name(self):
+        box = self.Watched("555", [1, 2])
+        server.imap_connect = lambda: box
+        folder = "Folders/Watch UIDNEXT 999999"
+        server.tool_poll_mailbox({"folder": folder})
+        box.uids += [3, 4, 5]
+        self.assertIn("3 new message(s)",
+                      server.tool_poll_mailbox({"folder": folder}))
+
+
 class SpecialFolders(unittest.TestCase):
     """Not every server advertises RFC 6154 flags, so the name fallback is the
     only thing standing between a send and a missing copy in Sent."""
