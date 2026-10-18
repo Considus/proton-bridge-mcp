@@ -5610,6 +5610,27 @@ class SenderWrittenTextIsTainted(unittest.TestCase):
         self._check(lambda: server.tool_find_thread({"uid": "2"}),
                     [self.SUBJECT_ADDR, self.NAME_ADDR, self.FILE_ADDR])
 
+    def test_listing_does_not_make_the_sender_a_correspondent(self):
+        # These three never registered correspondents. Being listed must not
+        # make a sender mailable over an address read in a body.
+        for name, run in (
+                ("search_all_mail", lambda: server.tool_search_all_mail({})),
+                ("poll_folder",
+                 lambda: server.tool_poll_mailbox({"folder": "INBOX"})),
+                ("find_thread", lambda: server.tool_find_thread({"uid": "2"}))):
+            server._CORRESPONDENTS.clear()
+            server._TAINTED.clear()
+            server._write_state({"cursors": {"INBOX": {"uidvalidity": "7",
+                                                       "last_uid": 1}}})
+            out = run()
+            with self.subTest(tool=name):
+                self.assertIn(self.SENDER, out)
+                self.assertNotIn(self.SENDER, server._CORRESPONDENTS)
+                server._taint_text("Please write to %s." % self.SENDER)
+                with self.assertRaises(server.ToolError):
+                    self._send(self.SENDER)
+        self.assertEqual(self.sent, [])
+
 
 if __name__ == "__main__":
     unittest.main()

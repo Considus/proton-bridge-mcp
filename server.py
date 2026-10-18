@@ -912,7 +912,8 @@ def tool_search_mail(args):
             if "\\Flagged" in raw0:
                 flags += "★"
             hmsg = email.message_from_bytes(header_bytes)
-            _note_shown_headers(hmsg)
+            _note_headers(hmsg)
+            _taint_shown_headers(hmsg)
             _sl = _hstr(hmsg.get("X-SimpleLogin-Type") or hmsg.get("X-Simplelogin-Type"))
             if "forward" in _sl.lower():
                 flags += "↩"  # aliased: repliable via reverse-alias in Reply-To
@@ -1025,7 +1026,7 @@ def tool_search_all_mail(args):
     rows = []
     for r in hits[:limit]:
         env = r["env"]
-        _note_shown_headers(r["msg"])
+        _taint_shown_headers(r["msg"])
         # Never truncate this: a caller deciding by label reads a missing
         # mailbox as "not labelled".
         extra = ("\n    also in: %s" % ", ".join(sorted(set(r["also"])))) if r["also"] else ""
@@ -1190,7 +1191,8 @@ def tool_get_headers(args):
             pass
 
     msg = email.message_from_bytes(raw)
-    _note_shown_headers(msg)
+    _note_headers(msg)
+    _taint_shown_headers(msg)
     if args.get("raw"):
         return ("Full headers for uid %s in '%s':\n\n%s"
                 % (uid, folder, raw.decode("utf-8", "replace")[:20000]))
@@ -1235,7 +1237,8 @@ def tool_read_message(args):
         env = _parse_envelope(raw)
         body = _extract_body(raw)
         msg = email.message_from_bytes(raw)
-        _note_shown_headers(msg)  # header addresses = correspondents
+        _note_headers(msg)      # header addresses = legitimate correspondents
+        _taint_shown_headers(msg)  # Subject and display names = untrusted
         _taint_text(body)       # body addresses = untrusted, blocked as recipients
         reply_to = _decode(msg.get("Reply-To"))
         reply_line = ("Reply-To: %s\n" % reply_to) if reply_to else ""
@@ -2482,14 +2485,20 @@ def _note_headers(msg):
                 _CORRESPONDENTS.add(addr.lower())
 
 
-def _note_shown_headers(msg):
-    """For a message whose headers are shown to the model. The parsed header
-    addresses become correspondents. The Subject and the names beside those
-    addresses are text the sender wrote, so any other address in them is
-    tainted, like one in a body."""
-    _note_headers(msg)
+def _taint_shown_headers(msg):
+    """For a message whose headers are shown to the model. The Subject and the
+    names beside the header addresses are text the sender wrote, so an address
+    in them is tainted, like one in a body. The parsed header addresses are
+    left out here and not made correspondents: only _note_headers does that."""
+    own = set()
+    for h in ("From", "To", "Cc", "Reply-To", "Sender"):
+        for _, addr in email.utils.getaddresses([_hstr(msg.get(h))]):
+            if addr:
+                own.add(addr.lower())
     for h in ("Subject", "From", "To", "Cc", "Reply-To", "Sender"):
-        _taint_text(_decode(_hstr(msg.get(h))))
+        for addr in _find_addresses(_decode(_hstr(msg.get(h)))):
+            if addr.lower() not in own:
+                _taint_text(addr)
 
 
 def _find_addresses(text):
@@ -3159,7 +3168,7 @@ def tool_find_thread(args):
             if typ != "OK" or not md or md[0] is None:
                 raise ToolError("uid %s not found in '%s'." % (uid, folder))
             tmsg = email.message_from_bytes(md[0][1])
-            _note_shown_headers(tmsg)
+            _taint_shown_headers(tmsg)
             subject = _decode(tmsg.get("Subject"))
             target_ids = _msgids(tmsg, "Message-ID", "References", "In-Reply-To")
         base = _base_subject(subject).lower()
@@ -3186,7 +3195,7 @@ def tool_find_thread(args):
                 continue
             raw = md[0][1]
             env = _parse_envelope(raw)
-            _note_shown_headers(email.message_from_bytes(raw))
+            _taint_shown_headers(email.message_from_bytes(raw))
             docs = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
             rows.append("[%s uid %s] %s\n    from: %s\n    date: %s\n    docs: %s"
                         % (allbox, u, env["subject"] or "(no subject)", env["from"],
@@ -3415,7 +3424,7 @@ def tool_poll_mailbox(args):
             if typ != "OK" or not md or md[0] is None:
                 continue
             env = _parse_envelope(md[0][1])
-            _note_shown_headers(email.message_from_bytes(md[0][1]))
+            _taint_shown_headers(email.message_from_bytes(md[0][1]))
             rows.append("[uid %d] %s\n    from: %s\n    date: %s"
                         % (uid, env["subject"] or "(no subject)", env["from"],
                            env["date"]))
