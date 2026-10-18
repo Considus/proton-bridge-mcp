@@ -2600,7 +2600,11 @@ def tool_save_attachment(args):
     dest = _persist_dir() if persist else _resolve_dest(args.get("dest_dir"))
     conn = imap_connect()
     try:
-        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
+        validity = args.get("uidvalidity")
+        # Passed only when given, so callers and stubs of the plain
+        # three-argument form keep working.
+        raw = (_fetch_raw(conn, folder, uid, validity) if validity
+               else _fetch_raw(conn, folder, uid))
     finally:
         try:
             conn.logout()
