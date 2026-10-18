@@ -433,6 +433,20 @@ def _decode(s):
         return s
 
 
+def _hstr(value):
+    """A header value as a str. The parser hands back an email.header.Header
+    instead when the header holds raw 8-bit bytes, and that has no .strip() or
+    .lower(). Those bytes are kept as \\xNN escapes: two different values never
+    become equal, and the result stays ASCII, so it can go into an IMAP command."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return "".join(b.decode("ascii", "backslashreplace")
+                   if isinstance(b, bytes) else b
+                   for b, _ in decode_header(value))
+
+
 # IMAP protocol strings — reject anything that could break out of a mailbox
 # name, search term or uid and inject a SECOND command on the session. imaplib
 # does NOT guard its arguments: an embedded CR/LF is appended and sent verbatim,
@@ -598,7 +612,7 @@ def _parse_envelope(msg_bytes):
         "cc": _decode(msg.get("Cc")),
         "subject": _decode(msg.get("Subject")),
         "date": _decode(msg.get("Date")),
-        "message_id": (msg.get("Message-ID") or "").strip(),
+        "message_id": _hstr(msg.get("Message-ID")).strip(),
     }
 
 
@@ -803,7 +817,7 @@ def tool_search_mail(args):
                 flags += "★"
             hmsg = email.message_from_bytes(header_bytes)
             _note_headers(hmsg)
-            _sl = hmsg.get("X-SimpleLogin-Type") or hmsg.get("X-Simplelogin-Type") or ""
+            _sl = _hstr(hmsg.get("X-SimpleLogin-Type") or hmsg.get("X-Simplelogin-Type"))
             if "forward" in _sl.lower():
                 flags += "↩"  # aliased: repliable via reverse-alias in Reply-To
             rows.append(["[uid %s] %s\n    from: %s\n    date: %s  %s" % (
@@ -910,7 +924,7 @@ _AUTH_RE = re.compile(r"\b(spf|dkim|dmarc|arc)\s*=\s*(\w+)", re.I)
 def _auth_verdicts(msg):
     verdicts = {}
     for line in msg.get_all("Authentication-Results") or []:
-        for mech, result in _AUTH_RE.findall(line):
+        for mech, result in _AUTH_RE.findall(_hstr(line)):
             verdicts.setdefault(mech.lower(), result.lower())
     return verdicts
 
@@ -924,7 +938,7 @@ def _header_notes(msg, verdicts):
     """Only flag what is genuinely odd. Aliased mail legitimately has a
     differing Reply-To and Return-Path, and warning about it every time would
     train the reader to ignore the warnings."""
-    sl = msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type") or ""
+    sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
     aliased = "forward" in sl.lower()
     from_dom, path_dom = _domain_of(msg.get("From")), _domain_of(msg.get("Return-Path"))
     notes = []
@@ -1008,7 +1022,7 @@ def tool_read_message(args):
         # SimpleLogin alias detection: the reverse-alias to reply through is in
         # Reply-To on forwarded alias mail. Reply From the alias-owner address
         # (PROTON_ALIAS_FROM) to keep the alias masked.
-        sl = msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type") or ""
+        sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
         guidance = ""
         if "forward" in sl.lower():
             addr = email.utils.parseaddr(msg.get("Reply-To") or "")[1]
@@ -1214,15 +1228,15 @@ def _do_reply(args, reply_all):
                         "usable Reply-To or From header.")
 
     from_address = args.get("from_address")
-    sl = msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type") or ""
+    sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
     aliased = "forward" in sl.lower()
     if not from_address and aliased and ALIAS_FROM:
         from_address = ALIAS_FROM  # keeps the alias masked, see README
     _check_sender(from_address)
     _check_recipients(to, cc)
 
-    mid = (msg.get("Message-ID") or "").strip()
-    refs = (msg.get("References") or "").split()
+    mid = _hstr(msg.get("Message-ID")).strip()
+    refs = _hstr(msg.get("References")).split()
     if mid and mid not in refs:
         refs.append(mid)
     files = _load_attachments(args)
@@ -1486,7 +1500,7 @@ def tool_unsubscribe(args):
 
     msg = email.message_from_bytes(raw)
     _note_headers(msg)
-    header = msg.get("List-Unsubscribe")
+    header = _hstr(msg.get("List-Unsubscribe"))
     if not header:
         raise ToolError("That message has no List-Unsubscribe header, so there "
                         "is no standard way to unsubscribe from it. Look for a "
@@ -1494,9 +1508,9 @@ def tool_unsubscribe(args):
     targets = _ANGLE_RE.findall(header) or [header.strip()]
     mailtos = [t[len("mailto:"):] for t in targets if t.lower().startswith("mailto:")]
     urls = [t for t in targets if t.lower().startswith("http")]
-    one_click = "one-click" in (msg.get("List-Unsubscribe-Post") or "").lower()
+    one_click = "one-click" in _hstr(msg.get("List-Unsubscribe-Post")).lower()
 
-    sl = msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type") or ""
+    sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
     aliased = "forward" in sl.lower()
     subscribed = (msg.get("X-SimpleLogin-Envelope-To")
                   or msg.get("X-Simplelogin-Envelope-To")
@@ -1671,7 +1685,7 @@ def _label_index(conn, label_mailbox):
         raise ToolError("Cannot open label mailbox '%s'." % label_mailbox)
     index = {}
     for u, m in _scan_headers(conn):
-        mid = (m.get("Message-ID") or "").strip()
+        mid = _hstr(m.get("Message-ID")).strip()
         if mid and mid not in index:
             index[mid] = u
     return index
@@ -1696,7 +1710,7 @@ def _label_copy_uid(conn, label_mailbox, message_id):
     except imaplib.IMAP4.error:
         pass
     for u, m in _scan_headers(conn):
-        if (m.get("Message-ID") or "").strip() == message_id:
+        if _hstr(m.get("Message-ID")).strip() == message_id:
             return u
     return None
 
@@ -2473,7 +2487,7 @@ _THREAD_HDRS = "(BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID REFERENCES IN-REPLY
 def _msgids(msg, *headers):
     ids = set()
     for h in headers:
-        for tok in re.findall(r"<[^>]+>", msg.get(h) or ""):
+        for tok in re.findall(r"<[^>]+>", _hstr(msg.get(h))):
             ids.add(tok.strip())
     return ids
 
