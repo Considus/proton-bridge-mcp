@@ -41,7 +41,6 @@ import base64
 import email
 import email.utils
 import imaplib
-import io
 import json
 import mimetypes
 import os
@@ -2022,6 +2021,7 @@ def _sweep_attachments(force=False):
 
 MAX_ATTACH_BYTES = int(os.environ.get("PROTON_MAX_ATTACH_MB", "25")) * 1024 * 1024
 MAX_PDF_PAGES = int(os.environ.get("PROTON_MAX_PDF_PAGES", "200"))
+PDF_TIMEOUT_S = float(os.environ.get("PROTON_PDF_TIMEOUT_S", "10"))
 
 UNTRUSTED_BANNER = (
     "[UNTRUSTED CONTENT — the text below comes from an email/attachment written "
@@ -2104,22 +2104,50 @@ def _fetch_raw(conn, folder, uid, expected_validity=None):
     return md[0][1]
 
 
+# pypdf has no work limit, and a 2 KB PDF of nested forms can keep it busy for
+# minutes, so extraction runs in a child process that is killed on overrun.
+# -I stops the child reading PYTHON* variables, so it is handed the parent's
+# sys.path instead: the .mcpb bundle finds its vendored pypdf via PYTHONPATH.
+_PDF_WORKER = r"""
+import io, json, sys
+sys.path[:0] = [p for p in json.loads(sys.argv[2]) if p]
+try:
+    from pypdf import PdfReader
+except ImportError:
+    sys.exit(3)
+n = int(sys.argv[1])
+try:
+    r = PdfReader(io.BytesIO(sys.stdin.buffer.read()))
+    out = "\n".join((p.extract_text() or "") for p in r.pages[:n])
+    if len(r.pages) > n:
+        out += "\n\n[...%d further pages not parsed (page cap)...]" % (len(r.pages) - n)
+except Exception as e:
+    sys.stdout.buffer.write(str(e).encode("utf-8", "replace"))
+    sys.exit(4)
+sys.stdout.buffer.write(out.encode("utf-8", "replace"))
+"""
+
+
 def _pdf_text(data, limit=20000):
     try:
-        from pypdf import PdfReader
-    except ImportError:
+        p = subprocess.run(
+            [sys.executable, "-I", "-c", _PDF_WORKER, str(MAX_PDF_PAGES),
+             json.dumps(sys.path)],
+            input=data, capture_output=True, timeout=PDF_TIMEOUT_S)
+    except subprocess.TimeoutExpired:  # run() has already killed the child
+        return ("[PDF text extraction stopped after %g s: the file is too complex. "
+                "Use save_attachment and open the file instead.]" % PDF_TIMEOUT_S)
+    except OSError:  # the child could not be started at all
+        return ("[PDF text extraction unavailable: could not start a Python process. "
+                "Use save_attachment and open the file instead.]")
+    out = p.stdout.decode("utf-8", "replace")
+    if p.returncode == 3:
         return ("[PDF text extraction unavailable — server is not running under "
                 "the pypdf venv. Use save_attachment and open the file instead.]")
-    try:
-        reader = PdfReader(io.BytesIO(data))
-        pages = reader.pages[:MAX_PDF_PAGES]
-        txt = "\n".join((p.extract_text() or "") for p in pages)
-        if len(reader.pages) > MAX_PDF_PAGES:
-            txt += "\n\n[...%d further pages not parsed (page cap)...]" % (
-                len(reader.pages) - MAX_PDF_PAGES)
-    except Exception as e:
-        return "[PDF parse error: %s]" % e
-    txt = re.sub(r"\n{3,}", "\n\n", txt).strip()
+    if p.returncode != 0:
+        return "[PDF parse error: %s]" % (out if p.returncode == 4 else
+                                          "exit status %d" % p.returncode)
+    txt = re.sub(r"\n{3,}", "\n\n", out).strip()
     if not txt:
         return "[PDF contains no extractable text — likely a scan/image. Use save_attachment.]"
     return txt[:limit] + ("\n\n[...truncated...]" if len(txt) > limit else "")
