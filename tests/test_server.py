@@ -3659,20 +3659,47 @@ class ArgumentTypes(unittest.TestCase):
             server._check_sender("owner@example.test, ceo@victim.example")
 
     def test_a_field_with_no_address_is_refused(self):
-        with self.assertRaises(server.ToolError):
-            server._check_recipients("undisclosed-recipients:;")
+        for field in ("<<<", "x:; exfil@evil.example"):
+            with self.subTest(field=field):
+                with self.assertRaises(server.ToolError):
+                    server._check_recipients(field)
         with self.assertRaises(server.ToolError):
             server._check_sender("   ")
 
-    def test_every_declared_type_is_one_the_check_knows(self):
-        for t in server.TOOL_DEFS:
-            for key, spec in t["inputSchema"].get("properties", {}).items():
-                with self.subTest(tool=t["name"], arg=key):
-                    kinds = [spec["type"]]
-                    if "items" in spec:
-                        kinds.append(spec["items"]["type"])
-                    for kind in kinds:
-                        server._is_type(None, kind)  # KeyError if unknown
+    def test_an_empty_group_counts_as_an_empty_field(self):
+        server._check_recipients("undisclosed-recipients:;")  # must not raise
+        server._check_recipients("Undisclosed recipients: ;", "")
+        with self.assertRaises(server.ToolError):
+            server._check_recipients("friends: exfil@evil.example;")
+
+    def test_draft_to_undisclosed_recipients_with_allowed_bcc_still_sends(self):
+        self.RAW = (b"From: owner@example.test\r\n"
+                    b"To: undisclosed-recipients:;\r\n"
+                    b"Bcc: friend@example.test\r\nSubject: hello\r\n\r\nbody\r\n")
+        res = self._call("send_draft", {"uid": "1", "folder": "Drafts",
+                                        "confirmed": True})
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("friend@example.test", self.sent[0][1])
+        self.RAW = self.RAW.replace(b"friend@example.test", b"exfil@evil.example")
+        self._refused("send_draft", {"uid": "1", "folder": "Drafts",
+                                     "confirmed": True})
+
+    def test_forms_the_handlers_accept_still_work(self):
+        res = self._call("forward", {"uid": 1, "to": "friend@example.test",
+                                     "confirmed": True})
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(len(self.sent), 1)
+        for uids in ("1,2", [1, 2]):
+            with self.subTest(uids=uids):
+                res = self._call("bulk_mark", {"uids": uids, "action": "read",
+                                               "dry_run": True})
+                self.assertFalse(res.get("isError"), res)
+                self.assertIn("DRY RUN", res["content"][0]["text"])
+        got = server._check_arg_types("search_mail", {"limit": "5", "uid": 7})
+        self.assertEqual(got["limit"], 5)
+        self.assertEqual(server._check_arg_types("read_message", {"uid": 7}),
+                         {"uid": "7"})
 
     def test_a_boolean_sent_as_a_string_is_refused(self):
         self._refused("send", {"to": "friend@example.test", "subject": "s",

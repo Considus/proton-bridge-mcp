@@ -2187,6 +2187,11 @@ def _allowed_recipients():
     return {x.strip().lower() for x in raw.split(",") if x.strip()}
 
 
+# "undisclosed-recipients:;" and the like: groups with no members, which
+# name nobody, so they count as an empty field.
+_EMPTY_GROUPS_RE = re.compile(r'(?:[^:;<>@,"]*:\s*;(?:\s*,)?)+\s*')
+
+
 def _check_recipients(*fields):
     """Refuse any recipient known only from untrusted content. No override."""
     allow = _allowed_recipients()
@@ -2199,7 +2204,8 @@ def _check_recipients(*fields):
             raise ToolError("Recipients must be given as a string of "
                             "addresses, not a list or other value.")
         parsed = email.utils.getaddresses([field])
-        if field.strip() and not any(a for _, a in parsed):
+        if (field.strip() and not any(a for _, a in parsed)
+                and not _EMPTY_GROUPS_RE.fullmatch(field)):
             raise ToolError("Could not read any address in the recipient "
                             "field %r, so it is refused." % field[:80])
         for _, addr in parsed:
@@ -3943,37 +3949,39 @@ def _error(id_, code, message):
     _send({"jsonrpc": "2.0", "id": id_, "error": {"code": code, "message": message}})
 
 
-_JSON_TYPES = {"string": str, "boolean": bool, "array": list, "object": dict}
-
-
-def _is_type(value, kind):
-    if kind == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    return isinstance(value, _JSON_TYPES[kind])
+# The address fields reach the recipient and sender checks, so they must be
+# strings. Booleans gate sending, so "false" must not count as true. Every
+# other argument keeps the forms the handlers already accept on purpose.
+_ADDRESS_ARGS = ("to", "cc", "from_address")
 
 
 def _check_arg_types(name, args):
-    """Refuse an argument whose JSON type is not the one the tool declares,
-    so a handler never acts on a value its checks did not expect. A null is
-    treated as not given, and properties the tool does not declare are left
-    alone, both as before."""
+    """Refuse a boolean that is not a JSON boolean and an address field that
+    is not a string, and convert a number given for a string (uid: 12) or a
+    digit string given for an integer (limit: "10"). Returns the arguments to
+    use. A null is treated as not given and undeclared properties are left
+    alone, as before."""
     if not isinstance(args, dict):
         raise ToolError("Tool arguments must be a JSON object.")
     props = SCHEMAS[name].get("properties", {})
+    out = dict(args)
     for key, value in args.items():
-        spec = props.get(key)
-        if spec is None or value is None:
+        kind = props.get(key, {}).get("type")
+        if kind is None or value is None:
             continue
-        kind = spec["type"]
-        ok = _is_type(value, kind)
-        if ok and kind == "array" and "items" in spec:
-            ok = all(_is_type(v, spec["items"]["type"]) for v in value)
-        if not ok:
-            want = kind
-            if kind == "array" and "items" in spec:
-                want = "array of %s" % spec["items"]["type"]
-            raise ToolError("Argument '%s' must be of type %s. Nothing was "
-                            "done." % (key, want))
+        if kind == "boolean" and not isinstance(value, bool):
+            raise ToolError("Argument '%s' must be true or false. Nothing "
+                            "was done." % key)
+        if key in _ADDRESS_ARGS and not isinstance(value, str):
+            raise ToolError("Argument '%s' must be a string of addresses. "
+                            "Nothing was done." % key)
+        if (kind == "string" and isinstance(value, int)
+                and not isinstance(value, bool)):
+            out[key] = str(value)
+        elif (kind == "integer" and isinstance(value, str)
+              and value.strip().isdigit()):
+            out[key] = int(value)
+    return out
 
 
 def handle(req):
@@ -4009,7 +4017,7 @@ def handle(req):
         # added later cannot forget to log.
         audited = name in _MUTATING
         try:
-            _check_arg_types(name, args)
+            args = _check_arg_types(name, args)
             if audited and not args.get("dry_run"):
                 _rate_check(name)
             out = handler(args)
