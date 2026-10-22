@@ -1046,14 +1046,17 @@ _ARC_CHAIN_RE = re.compile(r"(?:^|\s)arc\.chain\s*=\s*(\S+)", re.I)
 
 
 def _simplelogin_forward(msg):
-    """True only when your own mail server proves a SimpleLogin forward: the
-    first arc verdict in an Authentication-Results header whose authserv-id
-    is in AUTHSERV_IDS is pass with simplelogin.co in its arc.chain, and
-    X-SimpleLogin-Type says forward. The sender can write that header and
-    any other Authentication-Results header, so neither counts alone."""
+    """True only when your own mail server proves a SimpleLogin forward: every
+    arc verdict in an Authentication-Results header whose authserv-id is in
+    AUTHSERV_IDS is pass with simplelogin.co in its arc.chain, there is at
+    least one, and X-SimpleLogin-Type says forward. The sender can write that
+    header and any other Authentication-Results header, so neither counts
+    alone. Every trusted arc result must agree because Bridge does not keep
+    header order: a forged pass can sit above the server's own arc=none."""
     sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
     if "forward" not in sl.lower():
         return False
+    seen = False
     for value in msg.get_all("Authentication-Results") or []:
         clauses = _ar_clauses(_hstr(value))
         head = clauses[0].split()
@@ -1063,9 +1066,11 @@ def _simplelogin_forward(msg):
             m = _AUTH_RE.match(clause)
             if m and m.group(1).lower() == "arc":
                 chain = _ARC_CHAIN_RE.search(clause, m.end())
-                return (m.group(2).lower() == "pass" and chain is not None
-                        and "simplelogin.co" in chain.group(1).lower().split(":"))
-    return False
+                if not (m.group(2).lower() == "pass" and chain is not None
+                        and "simplelogin.co" in chain.group(1).lower().split(":")):
+                    return False
+                seen = True
+    return seen
 
 
 _UNPROVEN_ALIAS = ("marked as SimpleLogin alias mail, but your mail server's "

@@ -5228,6 +5228,28 @@ class AliasReplyIdentity(unittest.TestCase):
             b"Authentication-Results: mail.protonmail.ch; arc=pass "
             b"arc.chain=:simplelogin.co\r\n"))
 
+    def test_forged_pass_above_the_real_stamp_does_not_count(self):
+        # Bridge does not keep header order, so a forged pass can sit above
+        # the receiving server's own arc=none. Every trusted arc result has
+        # to agree.
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=pass "
+            b"arc.chain=:simplelogin.co\r\n"
+            b"Authentication-Results: mail.protonmail.ch; arc=none "
+            b"smtp.remote-ip=192.0.2.10\r\n"))
+
+    def test_proton_layout_one_check_per_header_still_switches(self):
+        # Measured on real mail: one Authentication-Results header per check,
+        # DMARC first and ARC third, all stamped mail.protonmail.ch.
+        (env_from, rcpts), out = self._reply(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; dmarc=pass "
+            b"(p=quarantine dis=none) header.from=passmail.example.test\r\n"
+            b"Authentication-Results: mail.protonmail.ch; spf=pass "
+            b"smtp.mailfrom=passmail.example.test\r\n" + self.STAMP +
+            b"Authentication-Results: mail.protonmail.ch; dkim=pass "
+            b"header.d=passmail.example.test\r\n"))
+        self.assertEqual(env_from, "hidden@example.test")
+
     def test_stamp_without_the_forward_header_does_not_switch(self):
         self._assert_own_address(self._raw(self.STAMP, sl=b""))
 
