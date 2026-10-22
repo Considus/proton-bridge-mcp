@@ -2509,22 +2509,63 @@ def _persist_dir():
     return os.path.join(os.path.realpath(ATTACH_DIR), "persist")
 
 
+def _noted(state):
+    noted = state.get("saved_attachments")
+    return [e for e in noted if isinstance(e, list) and len(e) == 4] \
+        if isinstance(noted, list) else []
+
+
+def _record_saved(path, st):
+    """Note a file save_attachment wrote, so the sweep can tell it apart from
+    the owner's own files in the same folder. Only top-level saves are noted,
+    because only the top level is swept."""
+    try:
+        state = _read_state()
+        saved = [e for e in _noted(state) if e[0] != path]
+        saved.append([path, st.st_dev, st.st_ino, st.st_mtime_ns])
+        state["saved_attachments"] = saved
+        _write_state(state)
+    except Exception:
+        pass
+
+
+def _saved_files():
+    """-> [(path, mtime)] of top-level files in ATTACH_DIR this server saved
+    and nobody has replaced or changed since. Forgets the rest."""
+    root = os.path.realpath(ATTACH_DIR)
+    state = _read_state()
+    noted = _noted(state)
+    found, kept = [], []
+    for e in noted:
+        path, dev, ino, mtime_ns = e
+        try:
+            st = os.lstat(path)
+        except (TypeError, ValueError, OSError):
+            continue
+        if (st.st_dev, st.st_ino, st.st_mtime_ns) != (dev, ino, mtime_ns):
+            continue
+        kept.append(e)
+        if os.path.dirname(path) == root and os.path.isfile(path):
+            found.append((path, st.st_mtime))
+    if kept != state.get("saved_attachments", []):
+        try:
+            state["saved_attachments"] = kept
+            _write_state(state)
+        except Exception:
+            pass
+    return found
+
+
 def _sweep_attachments(force=False):
     """Ephemeral by default: files vanish after TTL so nothing lingers for the
     user to double-click. Runs before every tool call — the server is stateless
-    per call, so a sweep is the only cleanup that survives interrupted runs."""
-    root = os.path.realpath(ATTACH_DIR)
-    if not os.path.isdir(root):
-        return 0
-    keep = _persist_dir()
+    per call, so a sweep is the only cleanup that survives interrupted runs.
+    Only files this server saved are removed, never the owner's own."""
     now = time.time()
     removed = 0
-    for entry in os.listdir(root):
-        path = os.path.join(root, entry)
-        if os.path.realpath(path) == keep or os.path.isdir(path):
-            continue
+    for path, mtime in _saved_files():
         try:
-            if force or (now - os.path.getmtime(path)) > ATTACH_TTL:
+            if force or (now - mtime) > ATTACH_TTL:
                 os.remove(path)
                 removed += 1
         except OSError:
@@ -2876,6 +2917,10 @@ def tool_save_attachment(args):
             continue
         with os.fdopen(fd, "wb") as f:
             f.write(a["payload"])
+            f.flush()
+            st = os.fstat(f.fileno())
+        if not persist and dest == os.path.realpath(ATTACH_DIR):
+            _record_saved(path, st)
         saved.append("%s  (%d bytes%s)" % (
             path, a["size"],
             "" if n == 1 else "; %s was in use, so nothing was replaced" % base))
@@ -2992,11 +3037,7 @@ def tool_purge_attachments(args):
     """Delete every non-persisted saved attachment immediately."""
     root = os.path.realpath(ATTACH_DIR)
     if args.get("dry_run"):
-        try:
-            names = [f for f in os.listdir(root)
-                     if os.path.isfile(os.path.join(root, f))]
-        except OSError:
-            names = []
+        names = [os.path.basename(p) for p, _ in _saved_files()]
         return _dry("delete %d ephemeral file(s) from %s" % (len(names), root),
                     names or ["(nothing to delete)"])
     n = _sweep_attachments(force=True)
