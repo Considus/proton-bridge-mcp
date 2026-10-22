@@ -263,7 +263,7 @@ Worth being straight about its edges, because it's a strong backstop rather than
 
 ### Checking whether mail is what it says it is
 
-`get_headers` reports the SPF, DKIM and DMARC verdicts the receiving server reached, and points out a From domain that doesn't match the Return-Path. It won't cry wolf over your own aliases though. Mail forwarded through SimpleLogin always has a Reply-To and Return-Path that differ from the sender, so it says as much rather than flagging it, because a warning that fires on ordinary mail teaches you to ignore warnings.
+`get_headers` reports the SPF, DKIM and DMARC verdicts your own mail server reached, and points out a From domain that doesn't match the Return-Path. Only your server's verdicts count, mind, because anyone sending you mail can write a header claiming they passed. Proton stamps its own as `mail.protonmail.ch`, so that's the default, and if your mail lives somewhere else, `PROTON_AUTHSERV_ID` names its server instead. It won't cry wolf over your own aliases though. Mail forwarded through SimpleLogin always has a Reply-To and Return-Path that differ from the sender, so it says as much rather than flagging it, because a warning that fires on ordinary mail teaches you to ignore warnings. It won't vouch for the mail on that basis either, since the header saying it came through SimpleLogin is one any sender can write too.
 
 ## Nothing goes out quietly
 

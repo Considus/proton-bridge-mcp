@@ -977,14 +977,68 @@ def tool_search_all_mail(args):
             % (total, scanned, shown, "\n\n".join(rows)))
 
 
-_AUTH_RE = re.compile(r"\b(spf|dkim|dmarc|arc)\s*=\s*(\w+)", re.I)
+# Any sender can write an Authentication-Results header, so get_headers only
+# believes the ones whose authserv-id (the first word) names your own mail
+# server. Proton's inbound servers stamp mail.protonmail.ch; another host
+# sets PROTON_AUTHSERV_ID to its own name.
+def _authserv_ids():
+    return frozenset(s.strip().lower() for s in
+                     _cfg("PROTON_AUTHSERV_ID", "mail.protonmail.ch").split(",")
+                     if s.strip())
 
 
-def _auth_verdicts(msg):
+AUTHSERV_IDS = _authserv_ids()
+_AUTH_RE = re.compile(r"\s*(spf|dkim|dmarc|arc)(?:\s*/\s*\d+)?\s*=\s*([\w-]+)(?=\s|$)",
+                      re.I)
+
+
+def _ar_clauses(value):
+    """Split an Authentication-Results value on ';' as RFC 8601 does: comments
+    (nested too) are dropped and quoted strings are blanked, so text the
+    sender controls inside either can never start a clause."""
+    out, cur, depth, quoted, esc = [], [], 0, False, False
+    for ch in value:
+        if esc:
+            esc = False
+            if not depth:
+                cur.append("_")
+        elif ch == "\\" and (quoted or depth):
+            esc = True
+        elif quoted:
+            if ch == '"':
+                quoted = False
+            cur.append(ch if ch == '"' else "_")
+        elif ch == "(":
+            depth += 1
+        elif depth:
+            if ch == ")":
+                depth -= 1
+        elif ch == ";":
+            out.append("".join(cur))
+            cur = []
+        else:
+            quoted = ch == '"'
+            cur.append(ch)
+    out.append("".join(cur))
+    return out
+
+
+def _auth_verdicts(msg, authserv_ids=None):
+    """First result per method from the Authentication-Results headers whose
+    authserv-id is in authserv_ids, topmost first, reading only the
+    method=result at the start of each clause. None reads every header, which
+    is for parsing alone; get_headers passes AUTHSERV_IDS, and an empty set
+    gives no verdicts."""
     verdicts = {}
-    for line in msg.get_all("Authentication-Results") or []:
-        for mech, result in _AUTH_RE.findall(_hstr(line)):
-            verdicts.setdefault(mech.lower(), result.lower())
+    for value in msg.get_all("Authentication-Results") or []:
+        clauses = _ar_clauses(_hstr(value))
+        head = clauses[0].split()
+        if authserv_ids is not None and (not head or head[0].lower() not in authserv_ids):
+            continue
+        for clause in clauses[1:]:
+            m = _AUTH_RE.match(clause)
+            if m:
+                verdicts.setdefault(m.group(1).lower(), m.group(2).lower())
     return verdicts
 
 
@@ -1008,8 +1062,11 @@ def _header_notes(msg, verdicts):
                      "mailing lists and forwarders, worth a look otherwise."
                      % (from_dom, path_dom))
     if aliased:
-        notes.append("Forwarded through a SimpleLogin alias, so a differing "
-                     "Reply-To and Return-Path are expected here, not a red flag.")
+        notes.append("Says it was forwarded through a SimpleLogin alias, so a "
+                     "differing Reply-To and Return-Path (%s) would be expected "
+                     "here, not a red flag. Any sender can write that header, "
+                     "so it holds only if that Return-Path is your alias "
+                     "provider's." % (path_dom or "none"))
     if msg.get("List-Unsubscribe"):
         notes.append("Carries List-Unsubscribe, so it is bulk or marketing mail.")
     return notes
@@ -1040,9 +1097,15 @@ def tool_get_headers(args):
         return ("Full headers for uid %s in '%s':\n\n%s"
                 % (uid, folder, raw.decode("utf-8", "replace")[:20000]))
 
-    verdicts = _auth_verdicts(msg)
-    auth = "\n".join("  %-6s %s" % (m, verdicts.get(m, "not reported"))
+    verdicts = _auth_verdicts(msg, AUTHSERV_IDS)
+    missing = "not reported" if AUTHSERV_IDS else "not established"
+    auth = "\n".join("  %-6s %s" % (m, verdicts.get(m, missing))
                      for m in ("spf", "dkim", "dmarc", "arc"))
+    if not AUTHSERV_IDS:
+        auth += ("\n  Not checked: PROTON_AUTHSERV_ID is not set. Any sender can "
+                 "write an Authentication-Results header, so only your mail "
+                 "server's counts. Set PROTON_AUTHSERV_ID to the first word of "
+                 "the topmost one on mail you trust (raw=true shows it).")
     notes = _header_notes(msg, verdicts)
     meta = [h for h in msg.keys() if h.lower().startswith(("x-simplelogin", "x-pm-"))]
     return (

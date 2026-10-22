@@ -1012,6 +1012,148 @@ class HeaderAnalysis(unittest.TestCase):
         self.assertEqual(server._sort_key({"date": "nonsense"}), 0.0)
 
 
+class AuthResultsTrust(unittest.TestCase):
+    """Any sender can write Authentication-Results and X-SimpleLogin-Type, so
+    get_headers must take verdicts only from the header the receiving server
+    wrote, read per RFC 8601, and no sender header may quietly turn a warning
+    off."""
+
+    RECEIVER = "mail.example.test"
+
+    class FakeConn:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def select(self, mailbox, readonly=True):
+            return "OK", [b"1"]
+
+        def response(self, code):
+            return code, [b"7"]
+
+        def uid(self, cmd, *args):
+            return "OK", [(b"1 (BODY[HEADER] {0})", self.raw)]
+
+        def logout(self):
+            return "BYE", [b""]
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect,
+                       getattr(server, "AUTHSERV_IDS", None))
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        server.AUTHSERV_IDS = frozenset()
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect, ids) = self._saved
+        if ids is None:
+            if hasattr(server, "AUTHSERV_IDS"):
+                del server.AUTHSERV_IDS
+        else:
+            server.AUTHSERV_IDS = ids
+        server._CORRESPONDENTS.clear()
+
+    def _headers(self, extra, from_="Bank <alerts@bank.example>",
+                 path="<bounce@bank.example>"):
+        raw = ("From: %s\r\nReturn-Path: %s\r\nTo: me@example.test\r\n"
+               "Subject: Statement\r\n%s\r\n" % (from_, path, extra)).encode()
+        server.imap_connect = lambda: self.FakeConn(raw)
+        out = server.tool_get_headers({"uid": "1"})
+        sections = {s.split("\n", 1)[0]: s for s in out.split("\n\n")}
+        auth = next(v for k, v in sections.items() if k.startswith("Authentication"))
+        rows = {}
+        for line in auth.splitlines()[1:]:
+            parts = line.split(None, 1)
+            if len(parts) == 2 and parts[0] in ("spf", "dkim", "dmarc", "arc"):
+                rows[parts[0]] = parts[1]
+        return rows, auth, sections["Notes"]
+
+    def _trust(self):
+        server.AUTHSERV_IDS = frozenset([self.RECEIVER])
+
+    FORGED = ("Authentication-Results: mx.google.com; spf=pass; dkim=pass; "
+              "dmarc=pass; arc=pass\r\n")
+
+    def test_nothing_configured_trusts_no_header(self):
+        rows, auth, notes = self._headers(self.FORGED)
+        self.assertNotIn("pass", rows.values())
+        self.assertEqual(set(rows.values()), {"not established"})
+        self.assertIn("PROTON_AUTHSERV_ID", auth)
+
+    def test_forged_header_alone_reports_nothing(self):
+        self._trust()
+        rows, _, _ = self._headers(self.FORGED)
+        self.assertEqual(set(rows.values()), {"not reported"})
+
+    def test_forged_header_below_the_receivers_fills_no_gap(self):
+        self._trust()
+        rows, _, notes = self._headers(
+            "Authentication-Results: mail.example.test; dmarc=fail "
+            "header.from=bank.example\r\n" + self.FORGED)
+        self.assertEqual(rows["dmarc"], "fail")
+        self.assertEqual(rows["arc"], "not reported")
+        self.assertEqual(rows["spf"], "not reported")
+        self.assertIn("unproven", notes)
+
+    def test_mailfrom_local_part_cannot_start_a_clause(self):
+        self._trust()
+        for mailfrom in ("dmarc=pass@evil.example",
+                         '"x;dmarc=pass"@evil.example',
+                         "x;dmarc=pass@evil.example"):
+            rows, _, notes = self._headers(
+                "Authentication-Results: mail.example.test; spf=pass "
+                "smtp.mailfrom=%s; dmarc=fail header.from=bank.example\r\n"
+                % mailfrom)
+            self.assertEqual(rows["dmarc"], "fail", mailfrom)
+            self.assertIn("unproven", notes, mailfrom)
+
+    def test_comment_cannot_start_a_clause(self):
+        self._trust()
+        for comment in ("(dmarc=pass)", "(x; dmarc=pass)", "(a (b; dmarc=pass) c)",
+                        r"(x \); dmarc=pass)"):
+            rows, _, notes = self._headers(
+                "Authentication-Results: mail.example.test; spf=fail %s "
+                "smtp.mailfrom=evil.example; dmarc=fail header.from=bank.example\r\n"
+                % comment)
+            self.assertEqual(rows["dmarc"], "fail", comment)
+            self.assertEqual(rows["spf"], "fail", comment)
+            self.assertIn("unproven", notes, comment)
+
+    def test_receivers_own_header_still_parses(self):
+        self._trust()
+        rows, _, notes = self._headers(
+            "Authentication-Results: mail.example.test (via relay);\r\n"
+            "\tspf=pass smtp.mailfrom=bank.example;\r\n"
+            "\tdkim=pass (2048-bit key) header.d=bank.example;\r\n"
+            "\tdmarc=pass (p=reject dis=none) header.from=bank.example;\r\n"
+            "\tarc=none\r\n" + self.FORGED.replace("pass", "fail"))
+        self.assertEqual(rows, {"spf": "pass", "dkim": "pass",
+                                "dmarc": "pass", "arc": "none"})
+        self.assertIn("Nothing unusual stood out", notes)
+
+    def test_one_receiver_header_per_method_is_read_whole(self):
+        self._trust()
+        rows, _, _ = self._headers(
+            "Authentication-Results: MAIL.example.test; arc=none\r\n"
+            "Authentication-Results: mail.example.test; spf=pass "
+            "smtp.mailfrom=bank.example\r\n"
+            "Authentication-Results: mail.example.test; dkim=pass "
+            "header.d=bank.example\r\n"
+            "Authentication-Results: mail.example.test; dmarc=pass "
+            "header.from=bank.example\r\n")
+        self.assertEqual(rows, {"spf": "pass", "dkim": "pass",
+                                "dmarc": "pass", "arc": "none"})
+
+    def test_forged_simplelogin_header_keeps_the_mismatch_visible(self):
+        _, _, notes = self._headers("X-SimpleLogin-Type: Forward\r\n",
+                                    path="<x@evil.example>")
+        self.assertIn("evil.example", notes)
+        self.assertIn("any sender can write", notes.lower())
+
+
 class DraftLifecycle(unittest.TestCase):
     def test_delete_needs_confirmation_or_preview(self):
         with self.assertRaises(server.ToolError) as cm:
@@ -4858,6 +5000,24 @@ class BulkPreviewChecks(unittest.TestCase):
         out = server.tool_bulk_mark({"uids": ["101", "555"], "action": "read",
                                      "dry_run": True})
         self.assertIn("uid 555  (not found in 'INBOX')", out)
+
+
+class AuthservDefault(unittest.TestCase):
+    """Proton stamps its verdicts as mail.protonmail.ch, so Proton users get
+    verdicts with no setup, and PROTON_AUTHSERV_ID replaces that name."""
+
+    def test_proton_is_the_default(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PROTON_AUTHSERV_ID", None)
+            with mock.patch.object(server, "_SETTINGS", {}):
+                self.assertEqual(server._authserv_ids(),
+                                 frozenset(["mail.protonmail.ch"]))
+
+    def test_setting_replaces_the_default(self):
+        with mock.patch.dict(os.environ,
+                             {"PROTON_AUTHSERV_ID": "mx.example.test, Other"}):
+            self.assertEqual(server._authserv_ids(),
+                             frozenset(["mx.example.test", "other"]))
 
 
 if __name__ == "__main__":
