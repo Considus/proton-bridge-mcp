@@ -230,12 +230,21 @@ def _sender_domain(address):
 # without becoming a second copy of the mailbox.
 # ----------------------------------------------------------------------------
 _AUDIT_REDACT = ("body", "note")
+# Rotating replaces audit.log.1, so it waits until the newest record there is
+# this old. Otherwise a burst of calls could push out a send made minutes ago.
+_AUDIT_KEEP_S = 7 * 24 * 3600
 
 
 def _rotate_audit():
     try:
-        if os.path.getsize(AUDIT_LOG) > AUDIT_MAX_BYTES:
-            os.replace(AUDIT_LOG, AUDIT_LOG + ".1")
+        if os.path.getsize(AUDIT_LOG) <= AUDIT_MAX_BYTES:
+            return
+        try:
+            if time.time() - os.path.getmtime(AUDIT_LOG + ".1") < _AUDIT_KEEP_S:
+                return
+        except OSError:
+            pass  # no older generation yet
+        os.replace(AUDIT_LOG, AUDIT_LOG + ".1")
     except OSError:
         pass
 

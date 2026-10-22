@@ -937,6 +937,57 @@ class Audit(unittest.TestCase):
         self.assertEqual(rec["tool"], "send")
         self.assertEqual(rec["outcome"], "ok")
 
+    def _all_records(self):
+        recs = []
+        for path in (server.AUDIT_LOG + ".1", server.AUDIT_LOG):
+            if os.path.exists(path):
+                with open(path) as f:
+                    recs.extend(json.loads(l) for l in f if l.strip())
+        return recs
+
+    def test_burst_of_calls_does_not_evict_a_recent_send(self):
+        # The model sends, then makes a burst of audited calls that do
+        # nothing (dry runs that fail) with large extra arguments. That must
+        # not push the record of the send out of audit.log and audit.log.1.
+        saved = (server.AUDIT_MAX_BYTES, server.STATE_FILE, server.ATTACH_DIR)
+        server.AUDIT_MAX_BYTES = 4096
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        try:
+            server._audit("send", {"to": "friend@example.test",
+                                   "subject": "marker-subject"}, "ok", "Sent")
+            for i in range(40):
+                req = {"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                       "params": {"name": "mark", "arguments": {
+                           "action": "read", "dry_run": True,
+                           "pad": ["A" * 190] * 10}}}
+                with mock.patch("sys.stdout", new_callable=io.StringIO):
+                    server.handle(req)
+        finally:
+            server.AUDIT_MAX_BYTES, server.STATE_FILE, server.ATTACH_DIR = saved
+        recs = self._all_records()
+        sends = [r for r in recs if r["tool"] == "send"]
+        self.assertEqual(len(sends), 1, "the burst evicted the send record")
+        self.assertEqual(sends[0]["args"]["subject"], "marker-subject")
+        self.assertEqual(len([r for r in recs if r["tool"] == "mark"]), 40)
+
+    def test_still_rotates_once_the_old_generation_is_old(self):
+        saved = server.AUDIT_MAX_BYTES
+        server.AUDIT_MAX_BYTES = 100
+        try:
+            with open(server.AUDIT_LOG + ".1", "w") as f:
+                f.write('{"tool": "old"}\n')
+            old = time.time() - server._AUDIT_KEEP_S - 60
+            os.utime(server.AUDIT_LOG + ".1", (old, old))
+            server._audit("mark", {"uid": "1", "pad": "B" * 150}, "ok")
+            server._audit("mark", {"uid": "2"}, "ok")
+        finally:
+            server.AUDIT_MAX_BYTES = saved
+        tools = [r["tool"] for r in self._all_records()]
+        self.assertNotIn("old", tools)
+        self.assertEqual(tools, ["mark", "mark"])
+        self.assertEqual(len(self._read()), 1)
+
 
 class Replies(unittest.TestCase):
     def setUp(self):

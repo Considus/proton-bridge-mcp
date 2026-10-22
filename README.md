@@ -225,7 +225,7 @@ Passwords sit in your operating system's credential store, Keychain, Credential 
 
 Using it writes three more files, all next to the server and all owner-readable only. `state.json` keeps polling cursors, rate counters, the addresses refused as recipients and a list of the attachments it saved, with an empty `state.json.lock` beside it, `audit.log` records everything that changed something, and saved attachments land in `attachments/` until the TTL sweeps them. Each one has an override, `PROTON_STATE_FILE`, `PROTON_AUDIT_LOG` and `PROTON_ATTACH_DIR`, so none of them are stuck where they land by default.
 
-`audit.log` is the one worth a thought about where it sits. It keeps recipient addresses, subject lines and folder names in the clear, message bodies never, so over time it accumulates a record of who you write to without ever becoming a second copy of your mail. It rotates at 5MB and nothing expires by age, so the record runs as far back as your last 5MB of activity. That makes the folder you cloned into a question rather than a given. If it gets backed up, synced or indexed, the metadata goes with it, and pointing `PROTON_AUDIT_LOG` at somewhere outside that tree keeps the record on the machine that made it. On macOS a directory under `~/Library/Application Support/` that you exclude from Time Machine does the job, and excluding the directory rather than the file matters, because the rotated `audit.log.1` is a new file that needs to inherit the exclusion.
+`audit.log` is the one worth a thought about where it sits. It keeps recipient addresses, subject lines and folder names in the clear, message bodies never, so over time it accumulates a record of who you write to without ever becoming a second copy of your mail. It rotates at 5MB, nothing expires by age, and rotating never drops a record less than a week old, so the record runs as far back as your last 5MB of activity or the last week, whichever is further. That makes the folder you cloned into a question rather than a given. If it gets backed up, synced or indexed, the metadata goes with it, and pointing `PROTON_AUDIT_LOG` at somewhere outside that tree keeps the record on the machine that made it. On macOS a directory under `~/Library/Application Support/` that you exclude from Time Machine does the job, and excluding the directory rather than the file matters, because the rotated `audit.log.1` is a new file that needs to inherit the exclusion.
 
 ## Security
 
@@ -339,7 +339,7 @@ Whatever you ask it to, and only while it answers. Folder names, headers, messag
 
 ### What it writes, and where
 
-An audit log records anything that changed something, which is there so you can go back afterwards and see what was done in your name. It holds the tool, the time and the message it acted on, and never the body of a message or a note you wrote. It caps at 5MB and rotates, and `PROTON_AUDIT=0` turns it off.
+An audit log records anything that changed something, which is there so you can go back afterwards and see what was done in your name. It holds the tool, the time and the message it acted on, and never the body of a message or a note you wrote. It rotates at 5MB, always keeping at least the last week, and `PROTON_AUDIT=0` turns it off.
 
 Saved attachments land in the attachments folder and nowhere else, unless you widen that yourself.
 
