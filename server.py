@@ -979,9 +979,15 @@ def tool_search_all_mail(args):
 
 # Any sender can write an Authentication-Results header, so get_headers only
 # believes the ones whose authserv-id (the first word) names your own mail
-# server. Unset, it believes none of them.
-AUTHSERV_IDS = frozenset(s.strip().lower() for s in
-                         _cfg("PROTON_AUTHSERV_ID").split(",") if s.strip())
+# server. Proton's inbound servers stamp mail.protonmail.ch; another host
+# sets PROTON_AUTHSERV_ID to its own name.
+def _authserv_ids():
+    return frozenset(s.strip().lower() for s in
+                     _cfg("PROTON_AUTHSERV_ID", "mail.protonmail.ch").split(",")
+                     if s.strip())
+
+
+AUTHSERV_IDS = _authserv_ids()
 _AUTH_RE = re.compile(r"\s*(spf|dkim|dmarc|arc)(?:\s*/\s*\d+)?\s*=\s*([\w-]+)(?=\s|$)",
                       re.I)
 

@@ -5002,5 +5002,23 @@ class BulkPreviewChecks(unittest.TestCase):
         self.assertIn("uid 555  (not found in 'INBOX')", out)
 
 
+class AuthservDefault(unittest.TestCase):
+    """Proton stamps its verdicts as mail.protonmail.ch, so Proton users get
+    verdicts with no setup, and PROTON_AUTHSERV_ID replaces that name."""
+
+    def test_proton_is_the_default(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("PROTON_AUTHSERV_ID", None)
+            with mock.patch.object(server, "_SETTINGS", {}):
+                self.assertEqual(server._authserv_ids(),
+                                 frozenset(["mail.protonmail.ch"]))
+
+    def test_setting_replaces_the_default(self):
+        with mock.patch.dict(os.environ,
+                             {"PROTON_AUTHSERV_ID": "mx.example.test, Other"}):
+            self.assertEqual(server._authserv_ids(),
+                             frozenset(["mx.example.test", "other"]))
+
+
 if __name__ == "__main__":
     unittest.main()
