@@ -313,20 +313,35 @@ def _state_lock():
                 msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def _read_state():
+def _load_state():
+    """-> the saved state, {} when there is none yet, or None when STATE_FILE
+    exists but cannot be read. An unreadable file may hold saved recipient
+    refusals, so it is left for the owner and never overwritten."""
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
+    except FileNotFoundError:
         return {}
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_state():
+    return _load_state() or {}
 
 
 def _write_state(state):
     """A caller may have read the state before another process saved a
     refused address. Keep what is on disk now, so no entry is ever lost."""
     with _state_lock():
-        disk = _read_state()
+        disk = _load_state()
+        if disk is None:
+            raise ToolError(
+                "%s could not be read, so nothing was saved. It may hold the "
+                "addresses refused as recipients, so it is left as it is. The "
+                "user can fix or delete it (deleting it also resets polling "
+                "cursors and rate counters)." % STATE_FILE)
         saved = _saved_taint(disk) | _saved_taint(state)
         if saved:
             state["tainted"] = sorted(saved)
@@ -2499,15 +2514,20 @@ def _taint_text(text):
     if not new:
         return
     _TAINTED.update(new)
-    with _state_lock():
-        state = _read_state()
-        saved = _saved_taint(state)
-        room = max(0, TAINT_CAP - len(saved))
-        fresh = sorted(new - saved)
-        if len(fresh) > room:
-            state["taint_overflow"] = True
-        state["tainted"] = sorted(saved) + fresh[:room]
-        _replace_state(state)
+    try:
+        with _state_lock():
+            state = _load_state()
+            if state is None:
+                return   # left for the owner; _check_recipients fails closed
+            saved = _saved_taint(state)
+            room = max(0, TAINT_CAP - len(saved))
+            fresh = sorted(new - saved)
+            if len(fresh) > room:
+                state["taint_overflow"] = True
+            state["tainted"] = sorted(saved) + fresh[:room]
+            _replace_state(state)
+    except OSError:
+        pass   # the read still succeeds, and _TAINTED refuses them here
 
 
 def _is_tainted(addr, tainted):
@@ -2573,7 +2593,9 @@ _EMPTY_GROUPS_RE = re.compile(r'(?:[^:;<>@,"]*:\s*;(?:\s*,)?)+\s*')
 def _check_recipients(*fields):
     """Refuse any recipient known only from untrusted content. No override."""
     allow = _allowed_recipients()
-    state = _read_state()
+    state = _load_state()
+    unreadable = state is None
+    state = state or {}
     tainted = _TAINTED | _saved_taint(state)
     for field in fields:
         if field is None:
@@ -2592,6 +2614,15 @@ def _check_recipients(*fields):
             a = (addr or "").lower()
             if not a or a in _CORRESPONDENTS or a in allow:
                 continue
+            if unreadable:
+                raise ToolError(
+                    "BLOCKED: refusing to send to '%s'.\n\n"
+                    "%s could not be read, so the addresses saved as refused "
+                    "recipients cannot be checked, and every recipient that is "
+                    "not in a message header is refused. The user can add it "
+                    "to PROTON_ALLOWED_RECIPIENTS, or fix or delete that "
+                    "file (deleting it also resets polling cursors and rate "
+                    "counters)." % (a, STATE_FILE))
             if state.get("taint_overflow"):
                 raise ToolError(
                     "BLOCKED: refusing to send to '%s'.\n\n"
