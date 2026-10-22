@@ -116,11 +116,7 @@
     },
     {
       "name": "reply",
-      "description": "Reply to one message with correct threading. Replies to the Reply-To address when there is one, so alias mail stays masked. Pass draft=true to save it for review, or confirmed=true to send."
-    },
-    {
-      "name": "reply_all",
-      "description": "Reply to everyone on a message, with your own addresses removed from Cc and duplicates dropped. Same draft and confirmation rules as reply."
+      "description": "Reply to one message with correct threading. Replies to the Reply-To address when there is one, so alias mail stays masked. Pass all=true to reply to everyone, with your own addresses removed from Cc and duplicates dropped. Pass draft=true to save it for review, or confirmed=true to send."
     },
     {
       "name": "create_draft",

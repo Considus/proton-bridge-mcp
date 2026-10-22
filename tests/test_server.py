@@ -1453,7 +1453,8 @@ class PreviewBodyTaint(unittest.TestCase):
         self._send_to_body_address_is_refused(out)
 
     def test_reply_all_preview_taints_the_quoted_body(self):
-        out = server.tool_reply_all({"uid": "9", "body": "ok", "dry_run": True})
+        out = server.tool_reply({"uid": "9", "body": "ok", "dry_run": True,
+                                 "all": True})
         self._send_to_body_address_is_refused(out)
 
     def test_update_draft_preview_taints_a_rebuilt_body(self):
@@ -2564,7 +2565,7 @@ class SendPartialRefusal(unittest.TestCase):
                  "Subject: hello\r\n\r\nbody\r\n" % both).encode()
         return [
             ("send", {"to": both, "subject": "s", "body": "b"}, b""),
-            ("reply_all", {"uid": "1", "body": "b"}, mail),
+            ("reply", {"uid": "1", "body": "b", "all": True}, mail),
             ("forward", {"uid": "1", "to": both}, mail),
             ("unsubscribe", {"uid": "1", "send": True}, mail),
             ("send_draft", {"uid": "1", "folder": "Drafts"}, draft),
@@ -4484,7 +4485,7 @@ class Annotations(unittest.TestCase):
             self.assertFalse(server._annotations(name)["readOnlyHint"])
 
     def test_sending_is_destructive_and_not_idempotent(self):
-        for name in ("send", "forward", "reply", "reply_all", "send_draft"):
+        for name in ("send", "forward", "reply", "send_draft"):
             ann = server._annotations(name)
             self.assertTrue(ann["destructiveHint"], name)
             self.assertFalse(ann["idempotentHint"], name)
@@ -5532,6 +5533,85 @@ class AuthservDefault(unittest.TestCase):
                              frozenset(["mx.example.test", "other"]))
 
 
+class ReplyAllThroughReply(unittest.TestCase):
+    """reply_all became reply with all=true. Without it a reply goes to the
+    sender alone; with it, to everyone but our own addresses. Every check the
+    old pair made still runs on both."""
+
+    RAW = (b"From: friend@example.test\r\n"
+           b"To: owner@example.test, colleague@example.test\r\n"
+           b"Cc: other@example.test, Owner <OWNER@example.test>\r\n"
+           b"Subject: plans\r\nMessage-ID: <p1@example.test>\r\n\r\nhello\r\n")
+
+    FakeConn = ArgumentTypes.FakeConn
+    setUp = ArgumentTypes.setUp
+    tearDown = ArgumentTypes.tearDown
+    _call = ArgumentTypes._call
+    _refused = ArgumentTypes._refused
+
+    def _sent_to(self, **extra):
+        del self.sent[:]
+        res = self._call("reply", dict({"uid": "1", "body": "ok",
+                                        "confirmed": True}, **extra))
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(len(self.sent), 1, self.sent)
+        return sorted(self.sent[0][1])
+
+    def test_without_all_only_the_sender_gets_it(self):
+        self.assertEqual(self._sent_to(), ["friend@example.test"])
+        self.assertEqual(self._sent_to(all=False), ["friend@example.test"])
+
+    def test_with_all_everyone_but_us_gets_it(self):
+        self.assertEqual(self._sent_to(all=True),
+                         ["colleague@example.test", "friend@example.test",
+                          "other@example.test"])
+
+    def test_both_forms_need_confirmed_to_send(self):
+        for extra in ({}, {"all": True}, {"all": True, "confirmed": False}):
+            with self.subTest(**extra):
+                self._refused("reply", dict({"uid": "1", "body": "ok"}, **extra))
+
+    def test_all_as_a_string_is_refused(self):
+        self._refused("reply", {"uid": "1", "body": "ok", "all": "true",
+                                "confirmed": True})
+
+    def test_draft_reply_all_saves_and_sends_nothing(self):
+        res = self._call("reply", {"uid": "1", "body": "ok", "all": True,
+                                   "draft": True})
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.appended), 1)
+        self.assertIn(b"colleague@example.test", self.appended[0])
+
+    def test_preview_shows_everyone_and_sends_nothing(self):
+        res = self._call("reply", {"uid": "1", "body": "ok", "all": True,
+                                   "dry_run": True})
+        self.assertFalse(res.get("isError"), res)
+        self.assertIn("colleague@example.test", res["content"][0]["text"])
+        self.assertEqual((self.sent, self.appended), ([], []))
+
+    def test_attachments_outside_the_allowed_directories_are_refused(self):
+        for extra in ({}, {"all": True}, {"all": True, "draft": True}):
+            with self.subTest(**extra):
+                self._refused("reply", dict(
+                    {"uid": "1", "body": "ok", "confirmed": True,
+                     "attach": [os.path.abspath(__file__)]}, **extra))
+
+    def test_the_sender_allowlist_still_applies(self):
+        for extra in ({}, {"all": True}):
+            with self.subTest(**extra):
+                self._refused("reply", dict(
+                    {"uid": "1", "body": "ok", "confirmed": True,
+                     "from_address": "ceo@victim.example"}, **extra))
+
+    def test_reply_is_one_send_tool(self):
+        self.assertIn("reply", server._SEND_TOOLS)
+        self.assertNotIn("reply_all", server.HANDLERS)
+        ann = server._annotations("reply")
+        self.assertTrue(ann["destructiveHint"])
+        self.assertFalse(ann["idempotentHint"])
+
+
 class AliasReplyIdentity(unittest.TestCase):
     """The sender writes X-SimpleLogin-Type, and can write an
     Authentication-Results header too. A reply switches to the hidden
@@ -5583,8 +5663,8 @@ class AliasReplyIdentity(unittest.TestCase):
         self.assertFalse(res.get("isError"), res)
         return res["content"][0]["text"]
 
-    def _assert_own_address(self, raw, tool="reply"):
-        (env_from, rcpts), out = self._reply(raw, tool)
+    def _assert_own_address(self, raw, tool="reply", **extra):
+        (env_from, rcpts), out = self._reply(raw, tool, **extra)
         self.assertEqual(env_from, "owner@example.test")
         self.assertNotIn("hidden@example.test", out)
         return out
@@ -5596,7 +5676,7 @@ class AliasReplyIdentity(unittest.TestCase):
         self.assertIn("alias stays masked", out)
 
     def test_genuine_forward_reply_all_uses_the_alias_owner(self):
-        (env_from, rcpts), out = self._reply(self._raw(self.STAMP), "reply_all")
+        (env_from, rcpts), out = self._reply(self._raw(self.STAMP), all=True)
         self.assertEqual(env_from, "hidden@example.test")
 
     def test_forged_type_header_without_an_arc_stamp(self):
@@ -5618,7 +5698,7 @@ class AliasReplyIdentity(unittest.TestCase):
     def test_forged_stamp_from_another_server_reply_all(self):
         self._assert_own_address(self._raw(
             b"Authentication-Results: evil.example; arc=pass "
-            b"arc.chain=:simplelogin.co\r\n"), "reply_all")
+            b"arc.chain=:simplelogin.co\r\n"), all=True)
 
     def test_trusted_pass_through_another_forwarder(self):
         self._assert_own_address(self._raw(

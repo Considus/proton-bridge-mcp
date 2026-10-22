@@ -374,7 +374,7 @@ def _replace_state(state):
         pass
 
 
-_SEND_TOOLS = {"send", "forward", "reply", "reply_all", "send_draft", "unsubscribe"}
+_SEND_TOOLS = {"send", "forward", "reply", "send_draft", "unsubscribe"}
 
 
 def _rate_check(tool, n=1):
@@ -1621,11 +1621,7 @@ def _do_reply(args, reply_all):
 
 
 def tool_reply(args):
-    return _do_reply(args, reply_all=False)
-
-
-def tool_reply_all(args):
-    return _do_reply(args, reply_all=True)
+    return _do_reply(args, reply_all=bool(args.get("all")))
 
 
 def tool_create_draft(args):
@@ -4027,8 +4023,9 @@ TOOLS = [
         "name": "reply",
         "description": "Reply to one message with correct threading. Replies to "
                        "the Reply-To address when there is one, so alias mail stays "
-                       "masked. Pass draft=true to save it for review, or "
-                       "confirmed=true to send.",
+                       "masked. Pass all=true to reply to everyone, with your own "
+                       "addresses removed from Cc and duplicates dropped. Pass "
+                       "draft=true to save it for review, or confirmed=true to send.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4037,6 +4034,7 @@ TOOLS = [
                 "uid": {"type": "string"},
                 "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "all": {"type": "boolean", "description": "Reply to everyone on the message, not just the sender. Default false."},
                 "body": {"type": "string", "description": "Your reply text. The original is quoted beneath unless quote=false."},
                 "subject": {"type": "string", "description": "Override the auto 'Re: ...' subject."},
                 "quote": {"type": "boolean", "description": "Quote the original beneath your reply. Default true."},
@@ -4047,30 +4045,6 @@ TOOLS = [
             "required": ["uid", "body"],
         },
         "handler": tool_reply,
-    },
-    {
-        "name": "reply_all",
-        "description": "Reply to everyone on a message, with your own addresses "
-                       "removed from Cc and duplicates dropped. Same draft and "
-                       "confirmation rules as reply.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "attach": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path. Only from the allowed source directories."},
-                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
-                "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "body": {"type": "string", "description": "Your reply text. The original is quoted beneath unless quote=false."},
-                "subject": {"type": "string", "description": "Override the auto 'Re: ...' subject."},
-                "quote": {"type": "boolean", "description": "Quote the original beneath your reply. Default true."},
-                "from_address": {"type": "string", "description": "Must be on the sender allowlist. Left unset, alias mail automatically uses the alias-owner address."},
-                "draft": {"type": "boolean", "description": "Save to Drafts instead of sending. Needs no confirmation because nothing goes out."},
-                "confirmed": {"type": "boolean", "description": "Required to actually send. Not needed when draft=true."},
-            },
-            "required": ["uid", "body"],
-        },
-        "handler": tool_reply_all,
     },
     {
         "name": "create_draft",
@@ -4336,7 +4310,7 @@ TOOLS = [
 MODE = _mode()
 _MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
              "move_to_folder", "apply_label", "remove_label", "mark",
-             "save_attachment", "reply", "reply_all",
+             "save_attachment", "reply",
              "update_draft", "delete_draft", "send_draft", "unsubscribe",
              "delete_label"}
 # _MUTATING is a statement about mail, and readonly has to take away more than
@@ -4371,7 +4345,7 @@ _READ_ONLY = {"list_folders", "folder_status", "search_mail", "search_all_mail",
               "read_attachment", "view_attachment", "find_thread"}
 
 # Destroys something, or puts mail beyond recall.
-_DESTRUCTIVE = {"send", "forward", "reply", "reply_all", "send_draft",
+_DESTRUCTIVE = {"send", "forward", "reply", "send_draft",
                 "unsubscribe", "update_draft", "delete_draft", "delete_label",
                 "purge_attachments"}
 
@@ -4400,7 +4374,6 @@ TITLES = {
     "purge_attachments": "Delete saved attachments",
     "find_thread": "Find a thread",
     "reply": "Reply",
-    "reply_all": "Reply to all",
     "create_draft": "Create a draft",
     "update_draft": "Update a draft",
     "delete_draft": "Delete a draft",
