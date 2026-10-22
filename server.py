@@ -1233,8 +1233,10 @@ def _taint_preview(lines, msg):
     allow = _allowed_recipients()
     rcpts = [a.lower() for a in _envelope_recipients(msg)]
     rcpts = [a for a in rcpts if a not in _CORRESPONDENTS and a not in allow]
-    shown = "\n".join(l for l in lines
-                      if not l.startswith(("From:", "To:", "Cc:", "Bcc:")))
+    # Skip only the recipient lines _preview writes first; everything from
+    # the Subject line on (subject, parts, body) came from the message.
+    start = next((i for i, l in enumerate(lines) if l.startswith("Subject:")), 0)
+    shown = "\n".join(lines[start:])
     for addr in _find_addresses(shown):
         addr = addr.lower()
         if addr in _CORRESPONDENTS or addr in _TAINTED:
