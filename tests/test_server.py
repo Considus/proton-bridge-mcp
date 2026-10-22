@@ -837,7 +837,7 @@ class BulkGuards(unittest.TestCase):
 
     def test_bulk_move_refuses_without_confirmation(self):
         with self.assertRaises(server.ToolError):
-            server.tool_bulk_move({"uids": ["1"], "to_folder": "Trash"})
+            server.tool_move_to_folder({"uids": ["1"], "to_folder": "Trash"})
 
     def test_dry_run_touches_nothing(self):
         fake = BulkPreviewChecks.Fake()
@@ -2337,7 +2337,7 @@ class ExpungeOnlyTheTarget(unittest.TestCase):
         self.assertIn("Archive", err)
 
     def test_bulk_move_keeps_other_deleted_mail(self):
-        out = server.tool_bulk_move({"uids": ["10"], "folder": "INBOX",
+        out = server.tool_move_to_folder({"uids": ["10"], "folder": "INBOX",
                                      "to_folder": "Archive", "confirmed": True})
         self.assertOtherKept("INBOX", "11")
         self.assertTargetKept("INBOX", "10")
@@ -3350,14 +3350,14 @@ class RemoveLabel(unittest.TestCase):
 
     def test_bulk_removal_is_gated(self):
         with self.assertRaises(server.ToolError) as cm:
-            server.tool_bulk_remove_label({"uids": ["1"], "label": "Processed"})
+            server.tool_remove_label({"uids": ["1"], "label": "Processed"})
         self.assertIn("confirmed", str(cm.exception))
 
     def test_bulk_dry_run_touches_nothing(self):
         fake = BulkPreviewChecks.Fake()
         fake.BOXES = self.BOXES
         with mock.patch.object(server, "imap_connect", lambda: fake):
-            out = server.tool_bulk_remove_label(
+            out = server.tool_remove_label(
                 {"uids": ["1", "2"], "label": "Processed", "dry_run": True})
         self.assertIn("DRY RUN", out)
         self.assertIn("Processed", out)
@@ -3463,7 +3463,7 @@ class RemoveLabelTarget(unittest.TestCase):
                       {"uid": "5", "folder": "Trash", "label": "Trash"})
 
     def test_bulk_trash_as_the_label_is_refused(self):
-        self._refused(self._proton(), server.tool_bulk_remove_label,
+        self._refused(self._proton(), server.tool_remove_label,
                       {"uids": ["5", "6"], "folder": "Trash", "label": "Trash"})
 
     def test_a_proton_folder_as_the_label_is_refused(self):
@@ -3480,7 +3480,7 @@ class RemoveLabelTarget(unittest.TestCase):
                       {"uid": "7", "folder": "INBOX", "label": "INBOX"})
 
     def test_trash_on_a_plain_server_is_refused(self):
-        self._refused(self._plain(), server.tool_bulk_remove_label,
+        self._refused(self._plain(), server.tool_remove_label,
                       {"uids": ["7"], "folder": "INBOX", "label": "Trash"})
 
     def test_a_special_use_mailbox_under_another_name_is_refused(self):
@@ -3500,7 +3500,7 @@ class RemoveLabelTarget(unittest.TestCase):
     def test_a_plain_server_label_mailbox_is_still_removed(self):
         fake = self._plain()
         server.imap_connect = lambda: fake
-        out = server.tool_bulk_remove_label(
+        out = server.tool_remove_label(
             {"uids": ["7"], "folder": "INBOX", "label": "Receipts",
              "confirmed": True})
         self.assertIn("from 1 of 1", out)
@@ -3645,7 +3645,7 @@ class EightBitHeaders(unittest.TestCase):
 
     def test_bulk_remove_label_takes_it_off_both(self):
         fake = self._labelled()
-        out = server.tool_bulk_remove_label(
+        out = server.tool_remove_label(
             {"uids": ["1", "2"], "folder": "INBOX", "label": "Work",
              "confirmed": True})
         self.assertIn("from 2 of 2", out)
@@ -3818,7 +3818,7 @@ class RemoveLabelSharedMessageId(unittest.TestCase):
 
     def test_bulk_removal_skips_a_shared_message_id_only(self):
         fake = self._fake()
-        out = server.tool_bulk_remove_label(
+        out = server.tool_remove_label(
             {"uids": ["600", "601"], "folder": "INBOX", "label": "Keep",
              "confirmed": True})
         self.assertIn("from 1 of 2", out)
@@ -3894,7 +3894,7 @@ class DeleteLabel(unittest.TestCase):
 
     def test_bulk_delete_is_gated(self):
         with self.assertRaises(server.ToolError) as cm:
-            server.tool_bulk_delete_labels({"labels": ["Invoices"]})
+            server.tool_delete_label({"labels": ["Invoices"]})
         self.assertIn("confirmed", str(cm.exception))
 
     def test_label_list_parsing(self):
@@ -4017,7 +4017,7 @@ class DeleteLabelKeepsMail(unittest.TestCase):
 
     def test_bulk_does_not_delete_the_only_copies(self):
         host = self._only_copies_host()
-        out = server.tool_bulk_delete_labels(
+        out = server.tool_delete_label(
             {"labels": ["Clients"], "confirmed": True})
         self.assertEqual(host.deleted, [])
         self.assertIn("Deleted 0 of 1", out)
@@ -4025,7 +4025,7 @@ class DeleteLabelKeepsMail(unittest.TestCase):
 
     def test_bulk_preview_marks_it_refused(self):
         self._only_copies_host()
-        out = server.tool_bulk_delete_labels(
+        out = server.tool_delete_label(
             {"labels": ["Clients"], "dry_run": True})
         self.assertIn("REFUSED", out)
 
@@ -4053,7 +4053,7 @@ class DeleteLabelKeepsMail(unittest.TestCase):
 
     def test_empty_label_is_deleted(self):
         host = self._use({"INBOX": [], "Labels": [], "Labels/Old": []})
-        server.tool_bulk_delete_labels({"labels": ["Old"], "confirmed": True})
+        server.tool_delete_label({"labels": ["Old"], "confirmed": True})
         self.assertEqual(host.deleted, ["Labels/Old"])
 
 
@@ -5064,7 +5064,7 @@ class ArgumentTypes(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         for uids in ("1,2", [1, 2]):
             with self.subTest(uids=uids):
-                res = self._call("bulk_mark", {"uids": uids, "action": "read",
+                res = self._call("mark", {"uids": uids, "action": "read",
                                                "dry_run": True})
                 self.assertFalse(res.get("isError"), res)
                 self.assertIn("DRY RUN", res["content"][0]["text"])
@@ -5182,10 +5182,10 @@ class BulkPreviewChecks(unittest.TestCase):
 
     def test_previews_name_each_message(self):
         calls = [
-            (server.tool_bulk_move, {"to_folder": "Trash"}),
-            (server.tool_bulk_mark, {"action": "read"}),
-            (server.tool_bulk_apply_label, {"label": "Keep"}),
-            (server.tool_bulk_remove_label, {"label": "Keep"}),
+            (server.tool_move_to_folder, {"to_folder": "Trash"}),
+            (server.tool_mark, {"action": "read"}),
+            (server.tool_apply_label, {"label": "Keep"}),
+            (server.tool_remove_label, {"label": "Keep"}),
         ]
         for fn, extra in calls:
             with self.subTest(tool=fn.__name__):
@@ -5195,16 +5195,16 @@ class BulkPreviewChecks(unittest.TestCase):
                 self._changed_nothing()
 
     def test_bulk_move_preview_needs_no_confirmation(self):
-        out = server.tool_bulk_move({"uids": ["101"], "to_folder": "Trash",
+        out = server.tool_move_to_folder({"uids": ["101"], "to_folder": "Trash",
                                      "dry_run": True})
         self.assertIn("Security alert for your account", out)
 
     def test_previews_refuse_a_stale_uidvalidity(self):
         calls = [
-            (server.tool_bulk_move, {"to_folder": "Trash"}),
-            (server.tool_bulk_mark, {"action": "read"}),
-            (server.tool_bulk_apply_label, {"label": "Keep"}),
-            (server.tool_bulk_remove_label, {"label": "Keep"}),
+            (server.tool_move_to_folder, {"to_folder": "Trash"}),
+            (server.tool_mark, {"action": "read"}),
+            (server.tool_apply_label, {"label": "Keep"}),
+            (server.tool_remove_label, {"label": "Keep"}),
         ]
         for fn, extra in calls:
             with self.subTest(tool=fn.__name__):
@@ -5215,7 +5215,7 @@ class BulkPreviewChecks(unittest.TestCase):
 
     def test_previews_refuse_a_missing_folder(self):
         with self.assertRaises(server.ToolError) as cm:
-            server.tool_bulk_mark({"uids": ["101"], "action": "read",
+            server.tool_mark({"uids": ["101"], "action": "read",
                                    "folder": "NoSuchSource", "dry_run": True})
         self.assertIn("Cannot open folder", str(cm.exception))
 
@@ -5223,17 +5223,17 @@ class BulkPreviewChecks(unittest.TestCase):
         for extra in ({"dry_run": True}, {"confirmed": True}):
             with self.subTest(**extra):
                 with self.assertRaises(server.ToolError) as cm:
-                    server.tool_bulk_move(dict(extra, uids=["101"],
+                    server.tool_move_to_folder(dict(extra, uids=["101"],
                                                to_folder="Trahs"))
                 self.assertIn("No folder called 'Trahs'", str(cm.exception))
 
     def test_bulk_move_accepts_inbox_in_any_case(self):
-        out = server.tool_bulk_move({"uids": ["101"], "to_folder": "inbox",
+        out = server.tool_move_to_folder({"uids": ["101"], "to_folder": "inbox",
                                      "dry_run": True})
         self.assertIn("Security alert for your account", out)
 
     def test_label_previews_refuse_a_missing_label(self):
-        for fn in (server.tool_bulk_apply_label, server.tool_bulk_remove_label):
+        for fn in (server.tool_apply_label, server.tool_remove_label):
             with self.subTest(tool=fn.__name__):
                 with self.assertRaises(server.ToolError) as cm:
                     fn({"uids": ["101"], "label": "NoSuchLabel",
@@ -5241,9 +5241,277 @@ class BulkPreviewChecks(unittest.TestCase):
                 self.assertIn("No label called 'NoSuchLabel'", str(cm.exception))
 
     def test_a_uid_that_is_not_there_is_shown_as_not_found(self):
-        out = server.tool_bulk_mark({"uids": ["101", "555"], "action": "read",
+        out = server.tool_mark({"uids": ["101", "555"], "action": "read",
                                      "dry_run": True})
         self.assertIn("uid 555  (not found in 'INBOX')", out)
+
+
+class MergedBulkEntryPoints(unittest.TestCase):
+    """mark, apply_label, remove_label, move_to_folder and delete_label each
+    took over a bulk tool. One target keeps the single tool's gate, more than
+    one needs confirmed=true, and the plural form keeps every gate the old
+    bulk tool had."""
+
+    MUTATING = BulkPreviewChecks.MUTATING
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect, dict(server.RATE_LIMITS))
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+        self.fake = BulkPreviewChecks.Fake()
+        server.imap_connect = lambda: self.fake
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect, limits) = self._saved
+        server.RATE_LIMITS.clear()
+        server.RATE_LIMITS.update(limits)
+
+    def _changes(self):
+        return [c for c in self.fake.log if c[0] in self.MUTATING]
+
+    CASES = [
+        (server.tool_mark, {"action": "read"}),
+        (server.tool_apply_label, {"label": "Keep"}),
+        (server.tool_remove_label, {"label": "Keep"}),
+        (server.tool_move_to_folder, {"to_folder": "Trash"}),
+    ]
+
+    def test_more_than_one_uid_without_confirmed_is_refused(self):
+        for fn, extra in self.CASES:
+            for uids in (["101", "102"], "101,102", "101 102"):
+                with self.subTest(tool=fn.__name__, uids=uids):
+                    self.fake.log = []
+                    with self.assertRaises(server.ToolError) as cm:
+                        fn(dict(extra, uids=uids))
+                    self.assertIn("confirmed", str(cm.exception))
+                    self.assertEqual(self._changes(), [])
+                    with self.assertRaises(server.ToolError):
+                        fn(dict(extra, uids=uids, confirmed=False))
+                    self.assertEqual(self._changes(), [])
+
+    def test_more_than_one_label_without_confirmed_is_refused(self):
+        for labels in (["Keep", "Other"], "Keep, Other"):
+            with self.subTest(labels=labels):
+                with self.assertRaises(server.ToolError) as cm:
+                    server.tool_delete_label({"labels": labels})
+                self.assertIn("confirmed", str(cm.exception))
+
+    def test_more_than_one_uid_with_confirmed_acts_on_each(self):
+        expect = {"tool_mark": "STORE", "tool_apply_label": "COPY",
+                  "tool_move_to_folder": "MOVE"}
+        for fn, extra in self.CASES:
+            if fn.__name__ not in expect:
+                continue  # remove_label's real run is covered with its fakes
+            with self.subTest(tool=fn.__name__):
+                self.fake.log = []
+                out = fn(dict(extra, uids=["101", "102"], confirmed=True))
+                acted = [c[1] for c in self.fake.log
+                         if c[0] == expect[fn.__name__]]
+                self.assertEqual(acted, ["101", "102"])
+                self.assertIn("2 of 2", out)
+                self.assertIn("done: 101, 102", out)
+
+    def test_bulk_failures_are_reported_per_message(self):
+        real = self.fake.uid
+
+        def uid(cmd, *args):
+            if cmd.upper() == "STORE" and args[0] == "102":
+                self.fake.log.append((cmd.upper(),) + args)
+                return "NO", [b"refused"]
+            return real(cmd, *args)
+        self.fake.uid = uid
+        out = server.tool_mark({"uids": ["101", "102"], "action": "star",
+                                "confirmed": True})
+        self.assertIn("1 of 2", out)
+        self.assertIn("done: 101", out)
+        self.assertIn("failed: 102", out)
+
+    def test_one_uid_keeps_the_single_tools_gate(self):
+        # mark, apply_label and move_to_folder never gated one message, and
+        # remove_label always did.
+        for fn, extra in self.CASES:
+            with self.subTest(tool=fn.__name__):
+                self.fake.log = []
+                args = dict(extra, uid="101")
+                if fn is server.tool_remove_label:
+                    with self.assertRaises(server.ToolError) as cm:
+                        fn(args)
+                    self.assertIn("confirmed", str(cm.exception))
+                    self.assertEqual(self._changes(), [])
+                else:
+                    fn(args)
+                    self.assertTrue(self._changes())
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_delete_label({"label": "Keep"})
+        self.assertIn("confirmed", str(cm.exception))
+
+    def test_the_plural_form_keeps_the_old_bulk_gate(self):
+        # The old bulk_move, bulk_remove_label and bulk_delete_labels refused
+        # even a single uid or label without confirmed=true.
+        for fn, extra in self.CASES[2:]:
+            with self.subTest(tool=fn.__name__):
+                self.fake.log = []
+                with self.assertRaises(server.ToolError) as cm:
+                    fn(dict(extra, uids=["101"]))
+                self.assertIn("confirmed", str(cm.exception))
+                self.assertEqual(self._changes(), [])
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_delete_label({"labels": ["Keep"]})
+        self.assertIn("confirmed", str(cm.exception))
+
+    def test_one_uid_in_the_plural_form_marks_and_labels_as_before(self):
+        # The old bulk_mark and bulk_apply_label took one uid unconfirmed.
+        for fn, extra in self.CASES[:2]:
+            with self.subTest(tool=fn.__name__):
+                self.fake.log = []
+                out = fn(dict(extra, uids=["101"]))
+                self.assertIn("1 of 1", out)
+                self.assertTrue(self._changes())
+
+    def test_uid_and_uids_together_are_refused(self):
+        for fn, extra in self.CASES:
+            with self.subTest(tool=fn.__name__):
+                self.fake.log = []
+                with self.assertRaises(server.ToolError) as cm:
+                    fn(dict(extra, uid="101", uids=["102"], confirmed=True))
+                self.assertIn("not both", str(cm.exception))
+                self.assertEqual(self.fake.log, [])
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_delete_label({"label": "Keep", "labels": ["Other"],
+                                      "confirmed": True})
+        self.assertIn("not both", str(cm.exception))
+
+    def test_no_target_is_refused(self):
+        for fn, extra in self.CASES:
+            with self.subTest(tool=fn.__name__):
+                with self.assertRaises(server.ToolError):
+                    fn(dict(extra, confirmed=True))
+        with self.assertRaises(server.ToolError):
+            server.tool_delete_label({"confirmed": True})
+
+    def test_the_cap_and_uid_checks_still_apply(self):
+        too_many = [str(i) for i in range(1, server.MAX_BULK + 2)]
+        for fn, extra in self.CASES:
+            for uids in (too_many, ["101", "1:*"], []):
+                with self.subTest(tool=fn.__name__, uids=uids[:2]):
+                    self.fake.log = []
+                    with self.assertRaises(server.ToolError):
+                        fn(dict(extra, uids=uids, confirmed=True))
+                    self.assertEqual(self._changes(), [])
+        with self.assertRaises(server.ToolError):
+            server.tool_delete_label({"labels": ["L%d" % i for i in
+                                                 range(server.MAX_BULK + 1)],
+                                      "confirmed": True})
+
+    def test_previews_need_no_confirmation(self):
+        for fn, extra in self.CASES:
+            with self.subTest(tool=fn.__name__):
+                self.fake.log = []
+                out = fn(dict(extra, uids=["101", "102"], dry_run=True))
+                self.assertIn("Security alert for your account", out)
+                self.assertIn("Weekly offers", out)
+                self.assertEqual(self._changes(), [])
+
+    def _call(self, name, arguments):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": name, "arguments": arguments}})
+        return json.loads(out.getvalue())["result"]
+
+    def _audit(self):
+        with open(server.AUDIT_LOG) as f:
+            return [json.loads(l) for l in f if l.strip()]
+
+    def test_a_batch_is_audited_and_rate_limited_as_one_write(self):
+        server.RATE_LIMITS["write"] = 1
+        res = self._call("mark", {"uids": ["101", "102"], "action": "read",
+                                  "confirmed": True})
+        self.assertFalse(res.get("isError"), res)
+        rec = self._audit()[-1]
+        self.assertEqual((rec["tool"], rec["outcome"]), ("mark", "ok"))
+        self.assertEqual(rec["args"]["uids"], ["101", "102"])
+        self.fake.log = []
+        res = self._call("move_to_folder", {"uids": ["101", "102"],
+                                            "to_folder": "Trash",
+                                            "confirmed": True})
+        self.assertTrue(res.get("isError"))
+        self.assertIn("Rate limit", res["content"][0]["text"])
+        self.assertEqual(self._changes(), [])
+
+    def test_a_refused_batch_is_audited(self):
+        res = self._call("apply_label", {"uids": ["101", "102"],
+                                         "label": "Keep"})
+        self.assertTrue(res.get("isError"))
+        rec = self._audit()[-1]
+        self.assertEqual((rec["tool"], rec["outcome"]),
+                         ("apply_label", "refused"))
+
+    def test_merged_tools_keep_the_stricter_hints(self):
+        # Each pair had the same hints, so the merged tool keeps them. Written
+        # out rather than derived, so a change to the sets has to agree.
+        want = {
+            "mark": (False, True), "apply_label": (False, True),
+            "remove_label": (False, True), "move_to_folder": (False, True),
+            "delete_label": (True, True),
+        }
+        for name, (destructive, idempotent) in want.items():
+            with self.subTest(tool=name):
+                ann = server._annotations(name)
+                self.assertFalse(ann["readOnlyHint"])
+                self.assertEqual(ann["destructiveHint"], destructive)
+                self.assertEqual(ann["idempotentHint"], idempotent)
+                self.assertIn(name, server._MUTATING)
+                self.assertNotIn(name, server._SEND_TOOLS)
+
+
+class ModeFilters(unittest.TestCase):
+    """What each mode registers, read off tools/list from a real server."""
+
+    def _tools(self, env):
+        tmp = tempfile.mkdtemp()
+        env = dict({"PROTON_USER": "me@example.test",
+                    "PROTON_SETTINGS_FILE": os.devnull,
+                    "PROTON_STATE_FILE": os.path.join(tmp, "state.json"),
+                    "PROTON_AUDIT_LOG": os.path.join(tmp, "audit.log"),
+                    "PROTON_ATTACH_DIR": os.path.join(tmp, "attachments")},
+                   **env)
+        msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
+                   env=env)
+        return {t["name"]: t for m in msgs if m.get("id") == 2
+                for t in m["result"]["tools"]}
+
+    def test_readonly_exposes_no_mutating_tool(self):
+        for env in ({"PROTON_MODE": "readonly"}, {"PROTON_READONLY": "1"}):
+            with self.subTest(**env):
+                tools = self._tools(env)
+                self.assertTrue(tools)
+                self.assertEqual(set(tools) & server._MUTATING, set())
+                self.assertEqual(set(tools) & server._SEND_TOOLS, set())
+                for gone in ("mark", "apply_label", "remove_label",
+                             "move_to_folder", "delete_label", "reply",
+                             "purge_attachments"):
+                    self.assertNotIn(gone, tools)
+
+    def test_organise_exposes_no_send_tool(self):
+        tools = self._tools({"PROTON_MODE": "organise"})
+        self.assertEqual(set(tools) & server._SEND_TOOLS, set())
+        for gone in ("send", "forward", "reply", "send_draft", "unsubscribe"):
+            self.assertNotIn(gone, tools)
+        for kept in ("mark", "apply_label", "remove_label", "move_to_folder",
+                     "delete_label", "create_draft"):
+            self.assertIn(kept, tools)
+
+    def test_full_mode_offers_the_merged_tools(self):
+        tools = self._tools({"PROTON_MODE": "full"})
+        for name in ("mark", "apply_label", "remove_label", "move_to_folder",
+                     "delete_label"):
+            self.assertIn("uids" if name != "delete_label" else "labels",
+                          tools[name]["inputSchema"]["properties"])
 
 
 class AuthservDefault(unittest.TestCase):

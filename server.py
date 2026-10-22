@@ -2028,19 +2028,47 @@ def tool_unsubscribe(args):
            "\n\nWorth knowing: " + advice[-1] if aliased else ""))
 
 
+def _one_or_many(args, single, plural):
+    """True when a call names several targets under `plural` (uids, labels),
+    False when it names one under `single` (uid, label). Never both, so a call
+    cannot be read two ways."""
+    one = args.get(single) is not None
+    many = args.get(plural) is not None
+    if one and many:
+        raise ToolError("Pass '%s' for one or '%s' for several, not both. "
+                        "Nothing was changed." % (single, plural))
+    if not one and not many:
+        raise ToolError("'%s' is required, or '%s' to act on several."
+                        % (single, plural))
+    return many
+
+
+def _gate_many(args, n, verb):
+    """Acting on more than one message needs confirmed=true, as every other
+    batch change here does. A preview needs none."""
+    if n > 1 and not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to %s %d messages without confirmed=true. "
+                        "Show the user the uids, or call with dry_run=true "
+                        "first, then confirm." % (verb, n))
+
+
+_MARK_FLAGS = {
+    "read": ("+FLAGS", r"(\Seen)"),
+    "unread": ("-FLAGS", r"(\Seen)"),
+    "star": ("+FLAGS", r"(\Flagged)"),
+    "unstar": ("-FLAGS", r"(\Flagged)"),
+}
+
+
 def tool_mark(args):
+    if _one_or_many(args, "uid", "uids"):
+        return _mark_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     action = args["action"]  # read | unread | star | unstar
-    mapping = {
-        "read": ("+FLAGS", r"(\Seen)"),
-        "unread": ("-FLAGS", r"(\Seen)"),
-        "star": ("+FLAGS", r"(\Flagged)"),
-        "unstar": ("-FLAGS", r"(\Flagged)"),
-    }
-    if action not in mapping:
+    if action not in _MARK_FLAGS:
         raise ToolError("action must be one of: read, unread, star, unstar")
-    op, flag = mapping[action]
+    op, flag = _MARK_FLAGS[action]
     conn = imap_connect()
     try:
         dry = bool(args.get("dry_run"))
@@ -2092,6 +2120,8 @@ def _resolve_label(conn, label):
 
 def tool_apply_label(args):
     """Tag a message. The message stays where it is."""
+    if _one_or_many(args, "uid", "uids"):
+        return _apply_label_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     conn = imap_connect()
@@ -2214,6 +2244,8 @@ def _resolve_label_for_removal(conn, label, folder):
 
 def tool_remove_label(args):
     """Take a label off a message. The message stays where it is."""
+    if _one_or_many(args, "uid", "uids"):
+        return _remove_label_many(args)
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to remove a label without confirmed=true. "
                         "Preview it with dry_run=true first if you are unsure.")
@@ -2244,7 +2276,7 @@ def tool_remove_label(args):
             pass
 
 
-def tool_bulk_remove_label(args):
+def _remove_label_many(args):
     """Take one label off many messages. Gated, like the single version."""
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing a bulk label removal without confirmed=true. "
@@ -2310,6 +2342,8 @@ def tool_bulk_remove_label(args):
 
 def tool_move_to_folder(args):
     """Filing = MOVE into Folders/<name> (or Archive/Trash)."""
+    if _one_or_many(args, "uid", "uids"):
+        return _move_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     dest = args["to_folder"]
@@ -3309,13 +3343,12 @@ def _bulk(args, verb, apply_one, readonly=False, check=None):
     return out
 
 
-def tool_bulk_mark(args):
+def _mark_many(args):
     action = args["action"]
-    mapping = {"read": ("+FLAGS", r"(\Seen)"), "unread": ("-FLAGS", r"(\Seen)"),
-               "star": ("+FLAGS", r"(\Flagged)"), "unstar": ("-FLAGS", r"(\Flagged)")}
-    if action not in mapping:
+    if action not in _MARK_FLAGS:
         raise ToolError("action must be one of: read, unread, star, unstar")
-    op, flag = mapping[action]
+    op, flag = _MARK_FLAGS[action]
+    _gate_many(args, len(_parse_uids(args)), "mark")
 
     def one(conn, uid):
         typ, resp = conn.uid("STORE", uid, op, flag)
@@ -3324,8 +3357,9 @@ def tool_bulk_mark(args):
     return _bulk(args, "mark as %s" % action, one)
 
 
-def tool_bulk_apply_label(args):
+def _apply_label_many(args):
     label = args["label"]
+    _gate_many(args, len(_parse_uids(args)), "label")
     resolved = {}
 
     def check(conn):
@@ -3339,7 +3373,7 @@ def tool_bulk_apply_label(args):
     return _bulk(args, "label '%s'" % label, one, check=check)
 
 
-def tool_bulk_move(args):
+def _move_many(args):
     """Gated: relocating a batch (Trash included) is the highest-blast-radius
     thing here. Marking and labelling are trivially reversible, this isn't."""
     if not args.get("dry_run") and not args.get("confirmed"):
@@ -3683,6 +3717,8 @@ def _parse_labels(args):
 
 def tool_delete_label(args):
     """Delete a label outright. Every message keeps its place and loses the tag."""
+    if _one_or_many(args, "label", "labels"):
+        return _delete_labels_many(args)
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to delete a label without confirmed=true. "
                         "Preview it with dry_run=true first to see how many "
@@ -3708,7 +3744,7 @@ def tool_delete_label(args):
             pass
 
 
-def tool_bulk_delete_labels(args):
+def _delete_labels_many(args):
     """Delete several labels in one pass. Same rules as delete_label."""
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to delete labels without confirmed=true. "
@@ -3988,58 +4024,6 @@ TOOLS = [
         "handler": tool_find_thread,
     },
     {
-        "name": "bulk_mark",
-        "description": "Mark many messages read/unread/starred in one pass. "
-                       "Far cheaper than one call per message.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
-            },
-            "required": ["uids", "action"],
-        },
-        "handler": tool_bulk_mark,
-    },
-    {
-        "name": "bulk_apply_label",
-        "description": "Apply one existing label to many messages. Messages stay "
-                       "where they are.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
-            },
-            "required": ["uids", "label"],
-        },
-        "handler": tool_bulk_apply_label,
-    },
-    {
-        "name": "bulk_move",
-        "description": "File or Trash many messages at once. GATED: preview with "
-                       "dry_run=true, show the user, then call with confirmed=true.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "to_folder": {"type": "string"},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["uids", "to_folder", "confirmed"],
-        },
-        "handler": tool_bulk_move,
-    },
-    {
         "name": "reply",
         "description": "Reply to one message with correct threading. Replies to "
                        "the Reply-To address when there is one, so alias mail stays "
@@ -4188,89 +4172,83 @@ TOOLS = [
     },
     {
         "name": "mark",
-        "description": "Mark a message read/unread or star/unstar.",
+        "description": "Mark one message (uid) or many in one pass (uids) "
+                       "read/unread or star/unstar. More than one needs "
+                       "confirmed=true; preview with dry_run=true first.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
+                "confirmed": {"type": "boolean", "description": "Required to change more than one message."},
             },
-            "required": ["uid", "action"],
+            "required": ["action"],
         },
         "handler": tool_mark,
     },
     {
         "name": "apply_label",
-        "description": "Tag a message with an existing label. The message stays "
-                       "where it is.",
+        "description": "Tag one message (uid) or many (uids) with an existing "
+                       "label. Messages stay where they are. More than one "
+                       "needs confirmed=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
+                "confirmed": {"type": "boolean", "description": "Required to change more than one message."},
             },
-            "required": ["uid", "label"],
+            "required": ["label"],
         },
         "handler": tool_apply_label,
     },
     {
         "name": "remove_label",
-        "description": "Take a label off a message. The message itself stays "
-                       "where it is. GATED: removing a label ends in an expunge "
-                       "against the label mailbox, so confirm it or preview with "
-                       "dry_run=true first.",
+        "description": "Take a label off one message (uid) or many (uids). The "
+                       "messages stay where they are. GATED: removing a label "
+                       "ends in an expunge against the label mailbox, so confirm "
+                       "it or preview with dry_run=true first.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Folder the message lives in, default INBOX."},
                 "label": {"type": "string", "description": "The label to take off. On Proton the Labels/ prefix is optional."},
                 "confirmed": {"type": "boolean"},
             },
-            "required": ["uid", "label"],
+            "required": ["label"],
         },
         "handler": tool_remove_label,
     },
     {
-        "name": "bulk_remove_label",
-        "description": "Take one label off many messages at once. The messages "
-                       "stay where they are. GATED, like remove_label.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "label": {"type": "string", "description": "The label to take off. On Proton the Labels/ prefix is optional."},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["uids", "label"],
-        },
-        "handler": tool_bulk_remove_label,
-    },
-    {
         "name": "move_to_folder",
-        "description": "File a message: move it into another folder (e.g. "
-                       "'Folders/<name>', 'Archive', 'Trash').",
+        "description": "File one message (uid) or many (uids): move it into "
+                       "another folder (e.g. 'Folders/<name>', 'Archive', "
+                       "'Trash'). Many at once is GATED: preview with "
+                       "dry_run=true, show the user, then call with confirmed=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "to_folder": {"type": "string"},
+                "confirmed": {"type": "boolean", "description": "Required whenever uids is used."},
             },
-            "required": ["uid", "to_folder"],
+            "required": ["to_folder"],
         },
         "handler": tool_move_to_folder,
     },
@@ -4296,32 +4274,18 @@ TOOLS = [
         "description": "Delete a label outright. Every message that carried it "
                        "stays exactly where it is and simply loses the tag — no "
                        "mail is deleted. Labels only; folders are where messages "
-                       "live and are not deletable here. GATED.",
+                       "live and are not deletable here. Pass label for one or "
+                       "labels for several. GATED.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "dry_run": {"type": "boolean", "description": "Preview it, including how many messages carry the label. Changes nothing, needs no confirmation."},
+                "dry_run": {"type": "boolean", "description": "Preview it, including how many messages carry each label. Changes nothing, needs no confirmation."},
                 "label": {"type": "string", "description": "The label to delete. On Proton the Labels/ prefix is optional."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Several label names, instead of label."},
                 "confirmed": {"type": "boolean"},
             },
-            "required": ["label"],
         },
         "handler": tool_delete_label,
-    },
-    {
-        "name": "bulk_delete_labels",
-        "description": "Delete several labels in one pass. Messages keep their "
-                       "place and lose the tags. Labels only, GATED.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "dry_run": {"type": "boolean", "description": "Preview each one, including how many messages carry it. Changes nothing."},
-                "labels": {"type": "array", "items": {"type": "string"}, "description": "Label names. On Proton the Labels/ prefix is optional."},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["labels"],
-        },
-        "handler": tool_bulk_delete_labels,
     },
     {
         "name": "send",
@@ -4372,10 +4336,9 @@ TOOLS = [
 MODE = _mode()
 _MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
              "move_to_folder", "apply_label", "remove_label", "mark",
-             "save_attachment", "bulk_mark", "bulk_apply_label",
-             "bulk_remove_label", "bulk_move", "reply", "reply_all",
+             "save_attachment", "reply", "reply_all",
              "update_draft", "delete_draft", "send_draft", "unsubscribe",
-             "delete_label", "bulk_delete_labels"}
+             "delete_label"}
 # _MUTATING is a statement about mail, and readonly has to take away more than
 # that. purge_attachments deletes files off the disk without ever touching the
 # mailbox, so it falls outside _MUTATING while plainly changing something, and
@@ -4410,14 +4373,13 @@ _READ_ONLY = {"list_folders", "folder_status", "search_mail", "search_all_mail",
 # Destroys something, or puts mail beyond recall.
 _DESTRUCTIVE = {"send", "forward", "reply", "reply_all", "send_draft",
                 "unsubscribe", "update_draft", "delete_draft", "delete_label",
-                "bulk_delete_labels", "purge_attachments"}
+                "purge_attachments"}
 
 # Running it twice lands in the same place as running it once.
-_IDEMPOTENT = {"ack_folder", "mark", "bulk_mark", "apply_label",
-               "bulk_apply_label", "remove_label", "bulk_remove_label",
-               "move_to_folder", "bulk_move", "create_folder_or_label",
-               "delete_label", "bulk_delete_labels", "delete_draft",
-               "update_draft", "save_attachment", "purge_attachments"}
+_IDEMPOTENT = {"ack_folder", "mark", "apply_label", "remove_label",
+               "move_to_folder", "create_folder_or_label", "delete_label",
+               "delete_draft", "update_draft", "save_attachment",
+               "purge_attachments"}
 
 # Everything else reaches the mailbox, and a mailbox is whoever writes to it.
 _LOCAL_ONLY = {"purge_attachments"}
@@ -4437,9 +4399,6 @@ TITLES = {
     "save_attachment": "Save an attachment",
     "purge_attachments": "Delete saved attachments",
     "find_thread": "Find a thread",
-    "bulk_mark": "Mark messages in bulk",
-    "bulk_apply_label": "Apply a label in bulk",
-    "bulk_move": "Move messages in bulk",
     "reply": "Reply",
     "reply_all": "Reply to all",
     "create_draft": "Create a draft",
@@ -4450,11 +4409,9 @@ TITLES = {
     "mark": "Mark a message",
     "apply_label": "Apply a label",
     "remove_label": "Remove a label",
-    "bulk_remove_label": "Remove a label in bulk",
     "move_to_folder": "Move to folder",
     "create_folder_or_label": "Create a folder or label",
     "delete_label": "Delete a label",
-    "bulk_delete_labels": "Delete labels in bulk",
     "send": "Send mail",
     "forward": "Forward",
 }
