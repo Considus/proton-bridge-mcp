@@ -9,4 +9,5 @@ attachments/
 settings.json
 audit.log*
 state.json
+state.json.lock
 dist/
