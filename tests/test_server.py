@@ -5594,6 +5594,20 @@ class SenderWrittenTextIsTainted(unittest.TestCase):
         self._check(lambda: server.tool_poll_mailbox({"folder": "INBOX"}),
                     [self.SUBJECT_ADDR, self.NAME_ADDR])
 
+    def test_move_preview(self):
+        self._check(lambda: server.tool_move_to_folder(
+            {"uid": "2", "to_folder": "INBOX", "dry_run": True}),
+            [self.SUBJECT_ADDR, self.NAME_ADDR])
+
+    def test_message_id_lookup_taints_what_it_shows(self):
+        server._TAINTED.clear()
+        conn = server.imap_connect()
+        server._message_id_of(conn, "2", "INBOX")
+        for addr in (self.SUBJECT_ADDR, self.NAME_ADDR):
+            with self.subTest(addr=addr):
+                with self.assertRaises(server.ToolError):
+                    self._send(addr)
+
     def test_get_headers(self):
         self._check(lambda: server.tool_get_headers({"uid": "2"}),
                     [self.SUBJECT_ADDR, self.NAME_ADDR])

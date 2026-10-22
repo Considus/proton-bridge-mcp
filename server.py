@@ -1331,6 +1331,7 @@ def _describe(conn, folder, uid):
                            "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
         if typ == "OK" and md and md[0] is not None:
             env = _parse_envelope(md[0][1])
+            _taint_shown_headers(email.message_from_bytes(md[0][1]))
             return "uid %s  \"%s\"  from %s" % (
                 uid, env["subject"] or "(no subject)", env["from"] or "(unknown)")
     except Exception:
@@ -2113,6 +2114,8 @@ def _message_id_of(conn, uid, folder):
                        "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM)])")
     if typ != "OK" or not md or md[0] is None:
         raise ToolError("Message uid %s not found in '%s'." % (uid, folder))
+    # Its Subject and From reach the model in previews, so they are shown text.
+    _taint_shown_headers(email.message_from_bytes(md[0][1]))
     return _parse_envelope(md[0][1])
 
 
