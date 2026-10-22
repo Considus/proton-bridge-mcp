@@ -269,7 +269,7 @@ Worth being straight about its edges, because it's a strong backstop rather than
 
 ### Replies keep an alias masked on their own
 
-If a message came in through a SimpleLogin alias, `reply` answers the reverse-alias rather than the sender, and sends from your alias-owner address without being told to. Get that wrong by hand and you either unmask yourself or the reply bounces, so it isn't left to memory.
+If a message came in through a SimpleLogin alias, `reply` answers the reverse-alias rather than the sender, and sends from your alias-owner address without being told to. It does check first, though, because any sender can write the header that says a message came through SimpleLogin, so it only switches when your own mail server's stamp shows it really did. Get that wrong by hand and you either unmask yourself or the reply bounces, so it isn't left to memory.
 
 ### Mail can only go out as you
 

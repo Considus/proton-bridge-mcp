@@ -5111,5 +5111,178 @@ class AuthservDefault(unittest.TestCase):
                              frozenset(["mx.example.test", "other"]))
 
 
+class AliasReplyIdentity(unittest.TestCase):
+    """The sender writes X-SimpleLogin-Type, and can write an
+    Authentication-Results header too. A reply switches to the hidden
+    alias-owner address only when your own mail server's stamp shows the
+    message arrived with a passing ARC chain from simplelogin.co."""
+
+    FakeConn = ArgumentTypes.FakeConn
+    tearDown = ArgumentTypes.tearDown
+    _call = ArgumentTypes._call
+
+    def setUp(self):
+        ArgumentTypes.setUp(self)
+        self._ids = getattr(server, "AUTHSERV_IDS", None)
+        server.AUTHSERV_IDS = frozenset(["mail.protonmail.ch"])
+        server.ALIAS_FROM = "hidden@example.test"
+        self.addCleanup(self._restore_ids)
+
+    def _restore_ids(self):
+        if self._ids is None:
+            if hasattr(server, "AUTHSERV_IDS"):
+                del server.AUTHSERV_IDS
+        else:
+            server.AUTHSERV_IDS = self._ids
+
+    STAMP = (b"Authentication-Results: mail.protonmail.ch; arc=pass "
+             b"smtp.remote-ip=192.0.2.10 arc.chain=:simplelogin.co\r\n")
+
+    @staticmethod
+    def _raw(auth=b"", sl=b"X-SimpleLogin-Type: Forward\r\n"):
+        return (auth + b"From: Shop <shop@vendor.example.test>\r\n"
+                b"Reply-To: shop_at_vendor_abc@passmail.example.test\r\n"
+                b"To: me.shop@alias.example.test\r\nSubject: order\r\n"
+                b"Message-ID: <q1@vendor.example.test>\r\n" + sl +
+                b"\r\nhello\r\n")
+
+    def _reply(self, raw, tool="reply", **extra):
+        self.RAW = raw
+        del self.sent[:]
+        args = {"uid": "1", "body": "Sure.", "confirmed": True, "quote": False}
+        args.update(extra)
+        res = self._call(tool, args)
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(len(self.sent), 1, self.sent)
+        return self.sent[0], res["content"][0]["text"]
+
+    def _read(self, raw):
+        self.RAW = raw
+        res = self._call("read_message", {"uid": "1"})
+        self.assertFalse(res.get("isError"), res)
+        return res["content"][0]["text"]
+
+    def _assert_own_address(self, raw, tool="reply"):
+        (env_from, rcpts), out = self._reply(raw, tool)
+        self.assertEqual(env_from, "owner@example.test")
+        self.assertNotIn("hidden@example.test", out)
+        return out
+
+    def test_genuine_forward_replies_from_the_alias_owner(self):
+        (env_from, rcpts), out = self._reply(self._raw(self.STAMP))
+        self.assertEqual(rcpts, ["shop_at_vendor_abc@passmail.example.test"])
+        self.assertEqual(env_from, "hidden@example.test")
+        self.assertIn("alias stays masked", out)
+
+    def test_genuine_forward_reply_all_uses_the_alias_owner(self):
+        (env_from, rcpts), out = self._reply(self._raw(self.STAMP), "reply_all")
+        self.assertEqual(env_from, "hidden@example.test")
+
+    def test_forged_type_header_without_an_arc_stamp(self):
+        out = self._assert_own_address(self._raw())
+        self.assertIn("own address", out)
+        self.assertIn("SimpleLogin", out)
+
+    def test_forged_type_header_with_direct_mail_stamp(self):
+        out = self._assert_own_address(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=none "
+            b"smtp.remote-ip=192.0.2.10\r\n"))
+        self.assertIn("own address", out)
+
+    def test_forged_stamp_from_another_server(self):
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: evil.example; arc=pass "
+            b"arc.chain=:simplelogin.co\r\n"))
+
+    def test_forged_stamp_from_another_server_reply_all(self):
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: evil.example; arc=pass "
+            b"arc.chain=:simplelogin.co\r\n"), "reply_all")
+
+    def test_trusted_pass_through_another_forwarder(self):
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=pass "
+            b"smtp.remote-ip=192.0.2.10 arc.chain=:lists.example.test\r\n"))
+
+    def test_chain_entry_must_be_simplelogin_itself(self):
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=pass "
+            b"arc.chain=:simplelogin.co.evil.example\r\n"))
+
+    def test_chain_in_a_comment_does_not_count(self):
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=pass "
+            b"(arc.chain=:simplelogin.co) arc.chain=:lists.example.test\r\n"))
+
+    def test_pass_in_a_comment_does_not_count(self):
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=none "
+            b"(; arc=pass arc.chain=:simplelogin.co)\r\n"))
+
+    def test_lower_copy_of_the_trusted_name_does_not_count(self):
+        # The receiving server's own stamp is the topmost one; a header
+        # further down that borrows its name was written by the sender.
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=none "
+            b"smtp.remote-ip=192.0.2.10\r\n"
+            b"Authentication-Results: mail.protonmail.ch; arc=pass "
+            b"arc.chain=:simplelogin.co\r\n"))
+
+    def test_forged_pass_above_the_real_stamp_does_not_count(self):
+        # Bridge does not keep header order, so a forged pass can sit above
+        # the receiving server's own arc=none. Every trusted arc result has
+        # to agree.
+        self._assert_own_address(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=pass "
+            b"arc.chain=:simplelogin.co\r\n"
+            b"Authentication-Results: mail.protonmail.ch; arc=none "
+            b"smtp.remote-ip=192.0.2.10\r\n"))
+
+    def test_proton_layout_one_check_per_header_still_switches(self):
+        # Measured on real mail: one Authentication-Results header per check,
+        # DMARC first and ARC third, all stamped mail.protonmail.ch.
+        (env_from, rcpts), out = self._reply(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; dmarc=pass "
+            b"(p=quarantine dis=none) header.from=passmail.example.test\r\n"
+            b"Authentication-Results: mail.protonmail.ch; spf=pass "
+            b"smtp.mailfrom=passmail.example.test\r\n" + self.STAMP +
+            b"Authentication-Results: mail.protonmail.ch; dkim=pass "
+            b"header.d=passmail.example.test\r\n"))
+        self.assertEqual(env_from, "hidden@example.test")
+
+    def test_stamp_without_the_forward_header_does_not_switch(self):
+        self._assert_own_address(self._raw(self.STAMP, sl=b""))
+
+    def test_no_trusted_server_configured_does_not_switch(self):
+        server.AUTHSERV_IDS = frozenset()
+        self._assert_own_address(self._raw(self.STAMP))
+
+    def test_explicit_from_address_is_still_honoured(self):
+        (env_from, rcpts), out = self._reply(
+            self._raw(), from_address="hidden@example.test")
+        self.assertEqual(env_from, "hidden@example.test")
+
+    def test_read_message_advises_the_alias_owner_on_genuine_forward(self):
+        out = self._read(self._raw(self.STAMP))
+        self.assertIn("From: hidden@example.test", out)
+
+    def test_read_message_does_not_advise_it_on_a_forged_type_header(self):
+        out = self._read(self._raw())
+        self.assertNotIn("hidden@example.test", out)
+        self.assertIn("own address", out)
+
+    def test_read_message_does_not_advise_it_on_a_forged_stamp(self):
+        out = self._read(self._raw(
+            b"Authentication-Results: evil.example; arc=pass "
+            b"arc.chain=:simplelogin.co\r\n"))
+        self.assertNotIn("hidden@example.test", out)
+
+    def test_read_message_does_not_advise_it_through_another_forwarder(self):
+        out = self._read(self._raw(
+            b"Authentication-Results: mail.protonmail.ch; arc=pass "
+            b"arc.chain=:lists.example.test\r\n"))
+        self.assertNotIn("hidden@example.test", out)
+
+
 if __name__ == "__main__":
     unittest.main()

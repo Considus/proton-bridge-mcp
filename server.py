@@ -1042,6 +1042,42 @@ def _auth_verdicts(msg, authserv_ids=None):
     return verdicts
 
 
+_ARC_CHAIN_RE = re.compile(r"(?:^|\s)arc\.chain\s*=\s*(\S+)", re.I)
+
+
+def _simplelogin_forward(msg):
+    """True only when your own mail server proves a SimpleLogin forward: every
+    arc verdict in an Authentication-Results header whose authserv-id is in
+    AUTHSERV_IDS is pass with simplelogin.co in its arc.chain, there is at
+    least one, and X-SimpleLogin-Type says forward. The sender can write that
+    header and any other Authentication-Results header, so neither counts
+    alone. Every trusted arc result must agree because Bridge does not keep
+    header order: a forged pass can sit above the server's own arc=none."""
+    sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
+    if "forward" not in sl.lower():
+        return False
+    seen = False
+    for value in msg.get_all("Authentication-Results") or []:
+        clauses = _ar_clauses(_hstr(value))
+        head = clauses[0].split()
+        if not head or head[0].lower() not in AUTHSERV_IDS:
+            continue
+        for clause in clauses[1:]:
+            m = _AUTH_RE.match(clause)
+            if m and m.group(1).lower() == "arc":
+                chain = _ARC_CHAIN_RE.search(clause, m.end())
+                if not (m.group(2).lower() == "pass" and chain is not None
+                        and "simplelogin.co" in chain.group(1).lower().split(":")):
+                    return False
+                seen = True
+    return seen
+
+
+_UNPROVEN_ALIAS = ("marked as SimpleLogin alias mail, but your mail server's "
+                   "Authentication-Results do not show it arrived through "
+                   "SimpleLogin")
+
+
 def _domain_of(value):
     addr = email.utils.parseaddr(value or "")[1]
     return addr.rsplit("@", 1)[1].lower() if "@" in addr else ""
@@ -1146,7 +1182,11 @@ def tool_read_message(args):
         # (PROTON_ALIAS_FROM) to keep the alias masked.
         sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
         guidance = ""
-        if "forward" in sl.lower():
+        if "forward" in sl.lower() and not _simplelogin_forward(msg):
+            guidance = ("\n↩ %s%s, and the sender may have written that "
+                        "header. A reply goes from your own address.\n"
+                        % (_UNPROVEN_ALIAS[0].upper(), _UNPROVEN_ALIAS[1:]))
+        elif "forward" in sl.lower():
             addr = email.utils.parseaddr(msg.get("Reply-To") or "")[1]
             if addr:
                 guidance = ("\n↩ SimpleLogin alias mail. To reply with the alias masked, "
@@ -1446,7 +1486,7 @@ def _do_reply(args, reply_all):
 
     from_address = args.get("from_address")
     sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
-    aliased = "forward" in sl.lower()
+    aliased = _simplelogin_forward(msg)
     if not from_address and aliased and ALIAS_FROM:
         from_address = ALIAS_FROM  # keeps the alias masked, see README
     _check_sender(from_address)
@@ -1466,6 +1506,8 @@ def _do_reply(args, reply_all):
 
     note = ("\n  (alias mail, sent from %s so the alias stays masked)" % from_address
             if aliased and from_address else "")
+    if "forward" in sl.lower() and not aliased and not from_address:
+        note = "\n  (%s, so it is from your own address)" % _UNPROVEN_ALIAS
     if args.get("dry_run"):
         if not as_draft:
             _check_recipients(*_envelope_recipients(reply))
