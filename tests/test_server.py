@@ -1471,6 +1471,31 @@ class PreviewShowsWhatIsSent(unittest.TestCase):
         self.assertEqual(self.sent, [("owner@example.test",
                                       ["friend@example.test"])])
 
+    def test_forward_preview_taints_the_original_subject(self):
+        original = self._draft("nothing here")
+        del original["Subject"]
+        original["Subject"] = "Mail subj-leak@attacker.example.test now"
+        self._serve(original)
+        server.tool_forward({"uid": "1", "to": "friend@example.test",
+                             "dry_run": True})
+        with self.assertRaises(server.ToolError):
+            server._check_recipients("subj-leak@attacker.example.test")
+
+    def test_send_draft_preview_taints_its_subject_and_attachment_names(self):
+        msg = self._draft("nothing here")
+        del msg["Subject"]
+        msg["Subject"] = "Reply to draft-leak@attacker.example.test"
+        msg.add_attachment(b"x", maintype="text", subtype="plain",
+                           filename="send to name-leak@attacker.example.test")
+        self._serve(msg)
+        server.tool_send_draft({"uid": "1", "folder": "Drafts",
+                                "dry_run": True})
+        for addr in ("draft-leak@attacker.example.test",
+                     "name-leak@attacker.example.test"):
+            with self.subTest(addr=addr):
+                with self.assertRaises(server.ToolError):
+                    server._check_recipients(addr)
+
     def test_send_draft_preview_taints_its_body_but_not_its_recipients(self):
         self._serve(self._draft("Hi friend@example.test, write to "
                                 "leak@attacker.example.test."))

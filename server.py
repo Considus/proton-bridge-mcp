@@ -1226,13 +1226,16 @@ def _preview(msg, limit=700, files=None):
 
 
 def _taint_preview(lines, msg):
-    """A preview that shows a stored body hands its addresses to the model,
-    so mark them as read_message would, except the ones this message is
-    already addressed to and that the checks have passed."""
+    """A preview that shows stored mail hands its addresses to the model, in
+    the body, the subject and attachment names alike, so mark them as
+    read_message would, except the ones this message is already addressed
+    to and that the checks have passed."""
     allow = _allowed_recipients()
     rcpts = [a.lower() for a in _envelope_recipients(msg)]
     rcpts = [a for a in rcpts if a not in _CORRESPONDENTS and a not in allow]
-    for addr in _find_addresses(lines[-1]):
+    shown = "\n".join(l for l in lines
+                      if not l.startswith(("From:", "To:", "Cc:", "Bcc:")))
+    for addr in _find_addresses(shown):
         addr = addr.lower()
         if addr in _CORRESPONDENTS or addr in _TAINTED:
             continue
