@@ -2504,6 +2504,9 @@ def _find_addresses(text):
     return found
 
 
+_UNSAVED = set()   # refused addresses a failed save could not write yet
+
+
 def _taint_text(text):
     """Every address the server hands to the model out of untrusted content."""
     new = set()
@@ -2511,23 +2514,28 @@ def _taint_text(text):
         addr = addr.lower()
         if addr not in _CORRESPONDENTS and addr not in _TAINTED:
             new.add(addr)
-    if not new:
-        return
     _TAINTED.update(new)
+    # Addresses a failed save left only in memory go out with the next save,
+    # so a restart after the disk recovers still refuses them.
+    pending = new | _UNSAVED
+    if not pending:
+        return
     try:
         with _state_lock():
             state = _load_state()
             if state is None:
+                _UNSAVED.update(pending)
                 return   # left for the owner; _check_recipients fails closed
             saved = _saved_taint(state)
             room = max(0, TAINT_CAP - len(saved))
-            fresh = sorted(new - saved)
+            fresh = sorted(pending - saved)
             if len(fresh) > room:
                 state["taint_overflow"] = True
             state["tainted"] = sorted(saved) + fresh[:room]
             _replace_state(state)
+        _UNSAVED.clear()
     except OSError:
-        pass   # the read still succeeds, and _TAINTED refuses them here
+        _UNSAVED.update(pending)   # the read still succeeds; retried later
 
 
 def _is_tainted(addr, tainted):

@@ -5380,6 +5380,7 @@ class TaintSaved(unittest.TestCase):
         server.STATE_FILE = os.path.join(self.tmp, "state.json")
         server._CORRESPONDENTS.clear()
         server._TAINTED.clear()
+        server._UNSAVED.clear()
         os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
 
     def tearDown(self):
@@ -5387,6 +5388,7 @@ class TaintSaved(unittest.TestCase):
         if self._cap is not None:
             server.TAINT_CAP = self._cap
         server._TAINTED.clear()
+        server._UNSAVED.clear()
 
     def test_a_flood_of_addresses_cannot_push_out_the_first(self):
         server.TAINT_CAP = 5
@@ -5438,6 +5440,18 @@ class TaintSaved(unittest.TestCase):
                 self.assertIn("leak@attacker.example.test", out)
                 with self.assertRaises(server.ToolError):
                     server._check_recipients("leak@attacker.example.test")
+
+    def test_a_failed_save_is_retried_on_a_later_read(self):
+        def fail(*a, **k):
+            raise OSError(28, "No space left on device")
+
+        with mock.patch.object(server, "_replace_state", fail):
+            server._taint_text("Write to retry@attacker.example.test")
+        # The disk recovers and the same message is read again.
+        server._taint_text("Write to retry@attacker.example.test")
+        server._TAINTED.clear()            # as in a new process
+        with self.assertRaises(server.ToolError):
+            server._check_recipients("retry@attacker.example.test")
 
     def _corrupt(self):
         with open(server.STATE_FILE, "w", encoding="utf-8") as f:
