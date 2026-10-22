@@ -901,6 +901,15 @@ def tool_list_folders(args):
 
 
 def tool_search_mail(args):
+    if args.get("all_folders"):
+        clash = [k for k in ("folder", "uidvalidity", "include_locations")
+                 if args.get(k)]
+        if clash:
+            raise ToolError(
+                "all_folders searches every mailbox, so it takes no %s. Every "
+                "row already names its mailbox, its uidvalidity and the other "
+                "mailboxes it is in." % " or ".join(clash))
+        return _search_all_mail(args)
     folder = args.get("folder", "INBOX")
     limit = int(args.get("limit", 15))
     conn = imap_connect()
@@ -966,7 +975,7 @@ def _sort_key(env):
         return 0.0
 
 
-def tool_search_all_mail(args):
+def _search_all_mail(args):
     """Search every selectable mailbox and collapse duplicates.
 
     In Proton a message lives in one folder but also appears under each label
@@ -3845,7 +3854,10 @@ TOOLS = [
         "description": "Search a folder. Combine any of: text, from, subject, "
                        "since (DD-Mon-YYYY), unread_only, flagged_only. Returns "
                        "uids + envelopes, newest first. Set include_locations to "
-                       "also report which labels and folders each message carries.",
+                       "also report which labels and folders each message carries. "
+                       "Set all_folders to search every mailbox at once when you "
+                       "do not know where something is: duplicates collapse by "
+                       "Message-ID and each row says where the message lives.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3857,32 +3869,13 @@ TOOLS = [
                 "before": {"type": "string", "description": "DD-Mon-YYYY. Combine with since for a date range."},
                 "unread_only": {"type": "boolean"},
                 "flagged_only": {"type": "boolean"},
-                "limit": {"type": "integer", "description": "Max results (default 15)."},
+                "limit": {"type": "integer", "description": "Max results (default 15, or the most recent 25 with all_folders)."},
+                "all_folders": {"type": "boolean", "description": "Search every mailbox instead of one folder. Takes no folder, uidvalidity or include_locations."},
                 "include_locations": {"type": "boolean", "description": "Report every other mailbox each message appears in, so you can tell what it is already labelled or filed as without a second search. Costs one search per mailbox."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
             },
         },
         "handler": tool_search_mail,
-    },
-    {
-        "name": "search_all_mail",
-        "description": "Search every mailbox at once and collapse duplicates by "
-                       "Message-ID, reporting where each message lives. Use when "
-                       "you do not know which folder something is in.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "from": {"type": "string"},
-                "subject": {"type": "string"},
-                "since": {"type": "string", "description": "DD-Mon-YYYY."},
-                "before": {"type": "string", "description": "DD-Mon-YYYY. Combine with since for a date range."},
-                "unread_only": {"type": "boolean"},
-                "flagged_only": {"type": "boolean"},
-                "limit": {"type": "integer", "description": "Most recent N (default 25)."},
-            },
-        },
-        "handler": tool_search_all_mail,
     },
     {
         "name": "get_headers",
@@ -4340,7 +4333,7 @@ elif MODE == "organise":
 # the disk and never touches the mailbox. poll_folder and ack_folder both write
 # the local checkpoint. Reusing _MUTATING here would have declared all three
 # read-only, which is the kind of wrong a reviewer takes at face value.
-_READ_ONLY = {"list_folders", "folder_status", "search_mail", "search_all_mail",
+_READ_ONLY = {"list_folders", "folder_status", "search_mail",
               "get_headers", "read_message", "list_attachments",
               "read_attachment", "view_attachment", "find_thread"}
 
@@ -4364,7 +4357,6 @@ TITLES = {
     "poll_folder": "Poll for new mail",
     "ack_folder": "Acknowledge poll checkpoint",
     "search_mail": "Search a folder",
-    "search_all_mail": "Search all mail",
     "get_headers": "Get message headers",
     "read_message": "Read a message",
     "list_attachments": "List attachments",

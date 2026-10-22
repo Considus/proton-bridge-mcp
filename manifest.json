@@ -76,11 +76,7 @@
     },
     {
       "name": "search_mail",
-      "description": "Search a folder. Combine any of: text, from, subject, since (DD-Mon-YYYY), unread_only, flagged_only. Returns uids + envelopes, newest first. Set include_locations to also report which labels and folders each message carries."
-    },
-    {
-      "name": "search_all_mail",
-      "description": "Search every mailbox at once and collapse duplicates by Message-ID, reporting where each message lives. Use when you do not know which folder something is in."
+      "description": "Search a folder. Combine any of: text, from, subject, since (DD-Mon-YYYY), unread_only, flagged_only. Returns uids + envelopes, newest first. Set include_locations to also report which labels and folders each message carries. Set all_folders to search every mailbox at once when you do not know where something is: duplicates collapse by Message-ID and each row says where the message lives."
     },
     {
       "name": "get_headers",

@@ -509,7 +509,7 @@ class FolderListing(unittest.TestCase):
 
     Bridge reports "/", Dovecot reports ".", and a server with no hierarchy
     reports NIL. Assuming "/" made every mailbox on a non-Bridge server vanish,
-    which left list_folders empty and search_all_mail searching nothing.
+    which left list_folders empty and an all_folders search searching nothing.
     """
 
     class FakeConn:
@@ -589,8 +589,8 @@ class FolderListing(unittest.TestCase):
         self.assertEqual(server._list_folders(conn), ["INBOX"])
 
     def test_noselect_survives_parsing(self):
-        """search_all_mail filters on this flag, so losing it would widen a
-        search onto mailboxes that cannot be opened."""
+        """An all_folders search filters on this flag, so losing it would widen
+        a search onto mailboxes that cannot be opened."""
         boxes = server._list_mailboxes(
             self.FakeConn([rb'(\Noselect \HasChildren) "." "INBOX.Archive"']))
         self.assertEqual(len(boxes), 1)
@@ -608,7 +608,7 @@ class FolderListing(unittest.TestCase):
 
 
 class SearchAllMailDedupe(unittest.TestCase):
-    """search_all_mail collapses copies of one stored message, never two
+    """An all_folders search collapses copies of one stored message, never two
     messages that only share a Message-ID. The sender writes that header, so
     a spoof reusing a real message's Message-ID must not hide the real one."""
 
@@ -685,7 +685,7 @@ class SearchAllMailDedupe(unittest.TestCase):
 
     def _run(self, fake):
         with mock.patch.object(server, "imap_connect", return_value=fake):
-            return server.tool_search_all_mail({})
+            return server.tool_search_mail({"all_folders": True})
 
     REAL_META = ("05-Jan-2026 09:00:01 +0000", 4100)
     SPOOF_META = ("12-Jan-2026 14:30:00 +0000", 3900)
@@ -765,9 +765,68 @@ class SearchAllMailDedupe(unittest.TestCase):
         self.assertIn("also in: All Mail, Labels/Tax", out)
 
 
+class SearchAllFolders(unittest.TestCase):
+    """search_all_mail became search_mail with all_folders=true. It keeps its
+    own default of 25 rows, and refuses the one-folder arguments it would
+    otherwise ignore."""
+
+    def _fake(self, n):
+        msgs = [(str(i), SearchAllMailDedupe._hdr(
+                    SearchAllMailDedupe, "s%d@x.example.test" % i,
+                    "Subject %d" % i, "<m%d@x.example.test>" % i),
+                 "05-Jan-2026 09:%02d:00 +0000" % i, 100 + i)
+                for i in range(1, n + 1)]
+        return SearchAllMailDedupe.Fake([("INBOX", "\\HasNoChildren", msgs)])
+
+    def test_one_folder_arguments_are_refused_before_connecting(self):
+        with mock.patch.object(server, "imap_connect",
+                               side_effect=AssertionError("connected")):
+            for extra in ({"folder": "INBOX"}, {"uidvalidity": "42"},
+                          {"include_locations": True}):
+                with self.subTest(**extra):
+                    with self.assertRaises(server.ToolError) as cm:
+                        server.tool_search_mail(dict(extra, all_folders=True))
+                    self.assertIn("all_folders", str(cm.exception))
+
+    def test_default_limits_are_kept(self):
+        with mock.patch.object(server, "imap_connect",
+                               return_value=self._fake(30)):
+            every = server.tool_search_mail({"all_folders": True})
+            one = server.tool_search_mail({})
+            off = server.tool_search_mail({"all_folders": False})
+        self.assertIn("30 distinct message(s) across 1 mailbox(es), showing "
+                      "the 25 most recent", every)
+        self.assertIn("[INBOX uid 30, uidvalidity 42]", every)
+        self.assertNotIn("uid 5,", every)
+        for out in (one, off):
+            self.assertIn("15 message(s) in 'INBOX'", out)
+            self.assertNotIn("distinct", out)
+
+    def test_limit_applies_to_all_folders(self):
+        with mock.patch.object(server, "imap_connect",
+                               return_value=self._fake(30)):
+            out = server.tool_search_mail({"all_folders": True, "limit": 3})
+        self.assertIn("showing the 3 most recent", out)
+
+    def test_filters_reach_every_mailbox(self):
+        seen = []
+        fake = self._fake(2)
+        real = fake.uid
+
+        def uid(cmd, *args):
+            if cmd.upper() == "SEARCH":
+                seen.append(args)
+            return real(cmd, *args)
+        fake.uid = uid
+        with mock.patch.object(server, "imap_connect", return_value=fake):
+            server.tool_search_mail({"all_folders": True, "from": "bank",
+                                     "unread_only": True})
+        self.assertEqual(seen, [(None, "UNSEEN", "FROM", '"bank"')])
+
+
 class SearchAllMailRanking(unittest.TestCase):
-    """search_all_mail keeps the most recent arrivals. The sender writes the
-    Date header, so a forged date must not take the top slots and push mail
+    """An all_folders search keeps the most recent arrivals. The sender writes
+    the Date header, so a forged date must not take the top slots and push mail
     that really arrived later out of the results."""
 
     Fake = SearchAllMailDedupe.Fake
@@ -791,7 +850,7 @@ class SearchAllMailRanking(unittest.TestCase):
 
     def _run(self, boxes, limit):
         with mock.patch.object(server, "imap_connect", return_value=self.Fake(boxes)):
-            return server.tool_search_all_mail({"limit": limit})
+            return server.tool_search_mail({"limit": limit, "all_folders": True})
 
     REAL = ("21", _hdr.__func__("billing@shop.example.test", "<inv-2@shop.example.test>",
                                 "Mon, 12 Jan 2026 14:30:00 +0000"),
@@ -3554,7 +3613,8 @@ class EightBitHeaders(unittest.TestCase):
                 if isinstance(spec, bytes):
                     spec = spec.decode()
                 # A real server reports the arrival time and size it assigned,
-                # which search_all_mail needs to tell copies from look-alikes.
+                # which an all_folders search needs to tell copies from
+                # look-alikes.
                 out = [(("%s (UID %s INTERNALDATE \"01-Jan-2026 00:00:00 +0000\" "
                          "RFC822.SIZE %d FLAGS (\\Seen)" % (u, u, len(raw))).encode(), raw)
                        for u, raw in box.items() if spec in ("1:*", u)]
@@ -3625,7 +3685,7 @@ class EightBitHeaders(unittest.TestCase):
     def test_search_all_mail_lists_every_row(self):
         self._connect({"INBOX": {"1": self.clean, "2": self.poison},
                        "All Mail": {"1": self.clean, "2": self.poison}})
-        out = server.tool_search_all_mail({})
+        out = server.tool_search_mail({"all_folders": True})
         self.assertIn("2 distinct message(s)", out)
         self.assertIn("Other topic", out)
 
@@ -6085,7 +6145,7 @@ class SenderWrittenTextIsTainted(unittest.TestCase):
                     [self.SUBJECT_ADDR, self.NAME_ADDR])
 
     def test_search_all_mail(self):
-        self._check(lambda: server.tool_search_all_mail({}),
+        self._check(lambda: server.tool_search_mail({"all_folders": True}),
                     [self.SUBJECT_ADDR, self.NAME_ADDR])
 
     def test_poll_folder(self):
@@ -6126,7 +6186,7 @@ class SenderWrittenTextIsTainted(unittest.TestCase):
         # These three never registered correspondents. Being listed must not
         # make a sender mailable over an address read in a body.
         for name, run in (
-                ("search_all_mail", lambda: server.tool_search_all_mail({})),
+                ("search_mail all_folders", lambda: server.tool_search_mail({"all_folders": True})),
                 ("poll_folder",
                  lambda: server.tool_poll_mailbox({"folder": "INBOX"})),
                 ("find_thread", lambda: server.tool_find_thread({"uid": "2"}))):
