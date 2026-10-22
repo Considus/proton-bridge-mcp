@@ -746,10 +746,14 @@ class BulkGuards(unittest.TestCase):
             server.tool_bulk_move({"uids": ["1"], "to_folder": "Trash"})
 
     def test_dry_run_touches_nothing(self):
-        out = server._bulk({"uids": ["1", "2"], "dry_run": True}, "move",
-                           lambda c, u: (_ for _ in ()).throw(
-                               AssertionError("must not run")))
+        fake = BulkPreviewChecks.Fake()
+        with mock.patch.object(server, "imap_connect", lambda: fake):
+            out = server._bulk({"uids": ["1", "2"], "dry_run": True}, "move",
+                               lambda c, u: (_ for _ in ()).throw(
+                                   AssertionError("must not run")))
         self.assertIn("DRY RUN", out)
+        self.assertEqual([c for c in fake.log
+                          if c[0] in BulkPreviewChecks.MUTATING], [])
 
 
 class Audit(unittest.TestCase):
@@ -2606,10 +2610,15 @@ class RemoveLabel(unittest.TestCase):
         self.assertIn("confirmed", str(cm.exception))
 
     def test_bulk_dry_run_touches_nothing(self):
-        out = server.tool_bulk_remove_label(
-            {"uids": ["1", "2"], "label": "Processed", "dry_run": True})
+        fake = BulkPreviewChecks.Fake()
+        fake.BOXES = self.BOXES
+        with mock.patch.object(server, "imap_connect", lambda: fake):
+            out = server.tool_bulk_remove_label(
+                {"uids": ["1", "2"], "label": "Processed", "dry_run": True})
         self.assertIn("DRY RUN", out)
         self.assertIn("Processed", out)
+        self.assertEqual([c for c in fake.log
+                          if c[0] in BulkPreviewChecks.MUTATING], [])
 
 
 class RemoveLabelTarget(unittest.TestCase):
@@ -4344,6 +4353,153 @@ class ArgumentTypes(unittest.TestCase):
     def test_string_form_of_the_tainted_address_is_still_refused(self):
         self._refused("send", {"to": "exfil@evil.example", "subject": "s",
                                "body": "b", "confirmed": True})
+
+
+class BulkPreviewChecks(unittest.TestCase):
+    """A bulk preview is what the owner approves a batch from, so it must name
+    each message and run the checks the real run makes, like the single-message
+    previews do. Echoing the uids back proves nothing about which mail it is."""
+
+    MUTATING = ("MOVE", "COPY", "STORE", "EXPUNGE", "APPEND")
+
+    class Fake:
+        """INBOX holds uids 101 and 102, UIDVALIDITY 7, and a Labels/ namespace."""
+
+        BOXES = ["INBOX", "Trash", "Labels/Keep"]
+        HEADERS = {
+            "101": b"From: Bank <alerts@bank.example.test>\r\n"
+                   b"Subject: Security alert for your account\r\n\r\n",
+            "102": b"From: Shop <news@shop.example.test>\r\n"
+                   b"Subject: Weekly offers\r\n\r\n",
+        }
+
+        def __init__(self):
+            self.log = []
+
+        def list(self, *a):
+            return "OK", ['(\\HasNoChildren) "/" "%s"' % b for b in self.BOXES]
+
+        def select(self, mailbox, readonly=False):
+            name = mailbox.strip('"')
+            self.log.append(("SELECT", name, readonly))
+            if name not in self.BOXES:
+                return "NO", [b"no such mailbox"]
+            return "OK", [b"2"]
+
+        def response(self, name):
+            return name, [b"7"]
+
+        def uid(self, cmd, *args):
+            cmd = cmd.upper()
+            self.log.append((cmd,) + args)
+            if cmd == "FETCH" and args[0] in self.HEADERS:
+                return "OK", [(b"1 (UID %s" % args[0].encode(),
+                               self.HEADERS[args[0]]), b")"]
+            if cmd == "FETCH":
+                return "OK", [None]
+            return "OK", [b"done"]
+
+        def expunge(self):
+            self.log.append(("EXPUNGE",))
+            return "OK", [b"done"]
+
+        def append(self, *a):
+            self.log.append(("APPEND",) + a)
+            return "OK", [b"done"]
+
+        def logout(self):
+            return "BYE", []
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+                       server.imap_connect)
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+        self.fake = self.Fake()
+        server.imap_connect = lambda: self.fake
+
+    def tearDown(self):
+        (server.STATE_FILE, server.AUDIT_LOG, server.ATTACH_DIR,
+         server.imap_connect) = self._saved
+
+    def _changed_nothing(self):
+        self.assertEqual([c for c in self.fake.log if c[0] in self.MUTATING], [])
+        self.assertTrue(all(c[2] for c in self.fake.log if c[0] == "SELECT"),
+                        "a preview opens the folder read-only")
+
+    def _names_each_message(self, out):
+        self.assertIn("DRY RUN", out)
+        self.assertIn("Security alert for your account", out)
+        self.assertIn("alerts@bank.example.test", out)
+        self.assertIn("Weekly offers", out)
+        self.assertIn("uidvalidity 7", out)
+
+    def test_previews_name_each_message(self):
+        calls = [
+            (server.tool_bulk_move, {"to_folder": "Trash"}),
+            (server.tool_bulk_mark, {"action": "read"}),
+            (server.tool_bulk_apply_label, {"label": "Keep"}),
+            (server.tool_bulk_remove_label, {"label": "Keep"}),
+        ]
+        for fn, extra in calls:
+            with self.subTest(tool=fn.__name__):
+                self.fake.log = []
+                out = fn(dict(extra, uids=["101", "102"], dry_run=True))
+                self._names_each_message(out)
+                self._changed_nothing()
+
+    def test_bulk_move_preview_needs_no_confirmation(self):
+        out = server.tool_bulk_move({"uids": ["101"], "to_folder": "Trash",
+                                     "dry_run": True})
+        self.assertIn("Security alert for your account", out)
+
+    def test_previews_refuse_a_stale_uidvalidity(self):
+        calls = [
+            (server.tool_bulk_move, {"to_folder": "Trash"}),
+            (server.tool_bulk_mark, {"action": "read"}),
+            (server.tool_bulk_apply_label, {"label": "Keep"}),
+            (server.tool_bulk_remove_label, {"label": "Keep"}),
+        ]
+        for fn, extra in calls:
+            with self.subTest(tool=fn.__name__):
+                with self.assertRaises(server.ToolError) as cm:
+                    fn(dict(extra, uids=["101"], uidvalidity="999",
+                            dry_run=True))
+                self.assertIn("UIDVALIDITY mismatch", str(cm.exception))
+
+    def test_previews_refuse_a_missing_folder(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_bulk_mark({"uids": ["101"], "action": "read",
+                                   "folder": "NoSuchSource", "dry_run": True})
+        self.assertIn("Cannot open folder", str(cm.exception))
+
+    def test_bulk_move_refuses_a_missing_destination(self):
+        for extra in ({"dry_run": True}, {"confirmed": True}):
+            with self.subTest(**extra):
+                with self.assertRaises(server.ToolError) as cm:
+                    server.tool_bulk_move(dict(extra, uids=["101"],
+                                               to_folder="Trahs"))
+                self.assertIn("No folder called 'Trahs'", str(cm.exception))
+
+    def test_bulk_move_accepts_inbox_in_any_case(self):
+        out = server.tool_bulk_move({"uids": ["101"], "to_folder": "inbox",
+                                     "dry_run": True})
+        self.assertIn("Security alert for your account", out)
+
+    def test_label_previews_refuse_a_missing_label(self):
+        for fn in (server.tool_bulk_apply_label, server.tool_bulk_remove_label):
+            with self.subTest(tool=fn.__name__):
+                with self.assertRaises(server.ToolError) as cm:
+                    fn({"uids": ["101"], "label": "NoSuchLabel",
+                        "dry_run": True})
+                self.assertIn("No label called 'NoSuchLabel'", str(cm.exception))
+
+    def test_a_uid_that_is_not_there_is_shown_as_not_found(self):
+        out = server.tool_bulk_mark({"uids": ["101", "555"], "action": "read",
+                                     "dry_run": True})
+        self.assertIn("uid 555  (not found in 'INBOX')", out)
 
 
 if __name__ == "__main__":
