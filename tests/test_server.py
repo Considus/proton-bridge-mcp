@@ -2872,6 +2872,105 @@ class RateLimit(unittest.TestCase):
             server._rate_check("send")
 
 
+class SendBudgetCountsRecipients(unittest.TestCase):
+    """The hourly send cap limits mail sent, so a message to three people uses
+    three units of it. Charged per call, one send to hundreds of addresses
+    cost the same as a send to one."""
+
+    def setUp(self):
+        import smtplib
+        self.tmp = tempfile.mkdtemp()
+        self._saved = {k: getattr(server, k) for k in (
+            "USER", "ALIAS_FROM", "STATE_FILE", "AUDIT_LOG", "AUDIT_ENABLED",
+            "ATTACH_DIR", "smtp_credentials", "_tls_context", "_security_mode")}
+        self._limits = dict(server.RATE_LIMITS)
+        self._smtp = smtplib.SMTP
+        server.USER, server.ALIAS_FROM = "owner@example.test", ""
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.AUDIT_ENABLED = True
+        server.ATTACH_DIR = os.path.join(self.tmp, "attachments")
+        server.smtp_credentials = lambda: ("owner@example.test", "x")
+        server._tls_context = lambda host: None
+        server._security_mode = lambda var, port: "starttls"
+        self.env = mock.patch.dict(os.environ)
+        self.env.start()
+        os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+        self._tainted = set(server._TAINTED)
+        server._TAINTED.clear()
+
+        self.commits = []
+        test = self
+
+        class FakeSMTP(smtplib.SMTP):
+            """Never connects. The real send_message runs, so the recipients
+            recorded are the RCPT TO list smtplib builds."""
+            def __init__(self, *a, **k):
+                super(FakeSMTP, self).__init__()
+            def ehlo(self, name=""):
+                self.ehlo_resp = b"ok"
+                return 250, b"ok"
+            def starttls(self, **k):
+                return 220, b"ok"
+            def login(self, user, password, **k):
+                return 235, b"ok"
+            def sendmail(self, from_addr, to_addrs, msg, *a, **k):
+                test.commits.append(list(to_addrs))
+                return {}
+            def send(self, s):
+                pass
+            def getreply(self):
+                return 221, b"bye"
+
+        smtplib.SMTP = FakeSMTP
+
+    def tearDown(self):
+        import smtplib
+        smtplib.SMTP = self._smtp
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+        server.RATE_LIMITS.clear()
+        server.RATE_LIMITS.update(self._limits)
+        self.env.stop()
+        server._TAINTED.clear()
+        server._TAINTED.update(self._tainted)
+
+    def _send(self, to):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "send", "arguments": {
+                               "to": to, "subject": "dummy",
+                               "body": "dummy body", "confirmed": True}}})
+        return json.loads(out.getvalue())["result"]
+
+    def _hits(self):
+        return len(server._read_state().get("rate", {}).get("send", []))
+
+    def test_one_recipient_uses_one_unit(self):
+        server.RATE_LIMITS["send"] = 5
+        res = self._send("r1@a.example.test")
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(self._hits(), 1)
+
+    def test_each_recipient_uses_a_unit(self):
+        server.RATE_LIMITS["send"] = 3
+        res = self._send("r1@a.example.test, r2@a.example.test, r3@a.example.test")
+        self.assertFalse(res.get("isError"), res)
+        self.assertEqual(self._hits(), 3)
+        res = self._send("r4@a.example.test")
+        self.assertTrue(res.get("isError"), res)
+        self.assertEqual(len(self.commits), 1)
+
+    def test_more_recipients_than_the_budget_sends_nothing(self):
+        server.RATE_LIMITS["send"] = 2
+        res = self._send("r1@a.example.test, r2@a.example.test, r3@a.example.test")
+        self.assertTrue(res.get("isError"), res)
+        self.assertIn("PROTON_RATE_SEND_PER_HOUR", res["content"][0]["text"])
+        self.assertEqual(self.commits, [])
+
+
 class PollingCursor(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
