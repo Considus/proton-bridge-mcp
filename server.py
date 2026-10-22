@@ -2999,22 +2999,29 @@ def tool_read_attachment(args):
             conn.logout()
         except Exception:
             pass
-    items = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
-    if not items:
-        raise ToolError("No document attachments on uid %s in '%s'." % (uid, folder))
-    if want:
-        match = [a for a in items if a["filename"].lower() == want.lower()] or \
-                [a for a in items if want.lower() in a["filename"].lower()]
-        if not match:
-            raise ToolError("No attachment matching '%s'. Present: %s"
-                            % (want, ", ".join(a["filename"] for a in items)))
-        att = match[0]
-    elif len(items) == 1:
-        att = items[0]
+    if args.get("include_inline"):
+        att = _pick_attachment(raw, want, include_inline=True)
     else:
-        raise ToolError("Multiple attachments — name one via 'filename': %s"
-                        % ", ".join(a["filename"] for a in items))
+        items = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
+        if not items:
+            raise ToolError("No document attachments on uid %s in '%s'. Pass "
+                            "include_inline=true to include inline images."
+                            % (uid, folder))
+        if want:
+            match = [a for a in items if a["filename"].lower() == want.lower()] or \
+                    [a for a in items if want.lower() in a["filename"].lower()]
+            if not match:
+                raise ToolError("No attachment matching '%s'. Present: %s"
+                                % (want, ", ".join(a["filename"] for a in items)))
+            att = match[0]
+        elif len(items) == 1:
+            att = items[0]
+        else:
+            raise ToolError("Multiple attachments — name one via 'filename': %s"
+                            % ", ".join(a["filename"] for a in items))
 
+    if att["ctype"].startswith("image/"):
+        return _image_result(att)
     if att["size"] > MAX_ATTACH_BYTES:
         raise ToolError("'%s' is %d bytes, over the %d MB cap. Raise "
                         "PROTON_MAX_ATTACH_MB if you trust this message."
@@ -3026,8 +3033,9 @@ def tool_read_attachment(args):
                                                 "message/rfc822", "text/calendar"):
         text = data.decode("utf-8", "replace")[:20000]
     else:
-        raise ToolError("'%s' is %s — not text-extractable. Use save_attachment "
-                        "to write it to disk and open it." % (att["filename"], ctype))
+        raise ToolError("'%s' is %s — neither text nor an image. Use "
+                        "save_attachment to write it to disk and open it."
+                        % (att["filename"], ctype))
     _taint_text(text)
     return "%s--- %s (%s, %d bytes) ---\n\n%s" % (
         UNTRUSTED_BANNER, att["filename"], ctype, att["size"], text)
@@ -3051,32 +3059,14 @@ def _pick_attachment(raw, want, include_inline=False):
                     % ", ".join(a["filename"] for a in items))
 
 
-def tool_view_attachment(args):
-    """Return an image attachment as a viewable image.
+def _image_result(att):
+    """An image attachment as a viewable image.
 
     Images only, deliberately. A client hands an image block to the model as a
     real image, so this is the only way to actually look at a photo or a scan.
     Base64 of anything else is just characters in the conversation that the
     model cannot interpret, at a third more bytes than the file itself, so
-    those are pushed back to read_attachment or save_attachment instead."""
-    folder = args.get("folder", "INBOX")
-    uid = _uidval(args["uid"])
-    conn = imap_connect()
-    try:
-        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-    att = _pick_attachment(raw, args.get("filename"), include_inline=True)
-    if not att["ctype"].startswith("image/"):
-        raise ToolError(
-            "'%s' is %s, not an image. This tool only returns images, because "
-            "base64 of anything else costs a third more than the file itself "
-            "and the model cannot read it. Use read_attachment for text and "
-            "PDFs, or save_attachment to put it on disk."
-            % (att["filename"], att["ctype"]))
+    read_attachment returns those as text or sends them to save_attachment."""
     if att["size"] > MAX_FETCH_BYTES:
         raise ToolError(
             "'%s' is %.1f MB, over the %d MB limit for inline images. Use "
@@ -3929,9 +3919,12 @@ TOOLS = [
     },
     {
         "name": "read_attachment",
-        "description": "Extract an attachment's TEXT inline — PDFs via pypdf, plus "
-                       "text/csv/json/ics/eml. Use for invoices, decks, reports. "
-                       "Binary/image types must use save_attachment instead.",
+        "description": "Read an attachment inline. Text comes back as text: "
+                       "PDFs via pypdf, plus text/csv/json/ics/eml, for invoices, "
+                       "decks, reports. An image comes back as a viewable image, "
+                       "the only way to see a photo or a scan when the client "
+                       "cannot read local files. Other binary types must use "
+                       "save_attachment instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3939,28 +3932,11 @@ TOOLS = [
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "filename": {"type": "string", "description": "Which attachment (partial match OK). Optional if there is only one."},
+                "include_inline": {"type": "boolean", "description": "Also consider inline images and PGP keys, which are hidden by default."},
             },
             "required": ["uid"],
         },
         "handler": tool_read_attachment,
-    },
-    {
-        "name": "view_attachment",
-        "description": "Look at an image attachment. Returns it as a viewable "
-                       "image, which is the only way to see a photo or a scan "
-                       "when the client cannot read local files. Images only, "
-                       "use read_attachment for text and PDFs.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uid": {"type": "string"},
-                "folder": {"type": "string", "description": "Default INBOX."},
-                "uidvalidity": {"type": "string"},
-                "filename": {"type": "string", "description": "Which image; partial match is fine."},
-            },
-            "required": ["uid"],
-        },
-        "handler": tool_view_attachment,
     },
     {
         "name": "save_attachment",
@@ -4335,7 +4311,7 @@ elif MODE == "organise":
 # read-only, which is the kind of wrong a reviewer takes at face value.
 _READ_ONLY = {"list_folders", "folder_status", "search_mail",
               "get_headers", "read_message", "list_attachments",
-              "read_attachment", "view_attachment", "find_thread"}
+              "read_attachment", "find_thread"}
 
 # Destroys something, or puts mail beyond recall.
 _DESTRUCTIVE = {"send", "forward", "reply", "send_draft",
@@ -4361,7 +4337,6 @@ TITLES = {
     "read_message": "Read a message",
     "list_attachments": "List attachments",
     "read_attachment": "Read an attachment",
-    "view_attachment": "View an image attachment",
     "save_attachment": "Save an attachment",
     "purge_attachments": "Delete saved attachments",
     "find_thread": "Find a thread",

@@ -92,11 +92,7 @@
     },
     {
       "name": "read_attachment",
-      "description": "Extract an attachment's TEXT inline — PDFs via pypdf, plus text/csv/json/ics/eml. Use for invoices, decks, reports. Binary/image types must use save_attachment instead."
-    },
-    {
-      "name": "view_attachment",
-      "description": "Look at an image attachment. Returns it as a viewable image, which is the only way to see a photo or a scan when the client cannot read local files. Images only, use read_attachment for text and PDFs."
+      "description": "Read an attachment inline. Text comes back as text: PDFs via pypdf, plus text/csv/json/ics/eml, for invoices, decks, reports. An image comes back as a viewable image, the only way to see a photo or a scan when the client cannot read local files. Other binary types must use save_attachment instead."
     },
     {
       "name": "save_attachment",
