@@ -1239,12 +1239,25 @@ def _taint_preview(lines, msg):
     shown = "\n".join(lines[start:])
     for addr in _find_addresses(shown):
         addr = addr.lower()
-        if addr in _CORRESPONDENTS or addr in _TAINTED:
+        # The message's own recipients passed the checks already, so a match
+        # that is one of them plus only punctuation is not tainted. Anything
+        # with more around it (friend@x.test.evil.example) stays tainted,
+        # even if that then blocks the recipient it embeds.
+        if (addr in _CORRESPONDENTS or addr in _TAINTED
+                or any(_only_punct_around(addr, r) for r in rcpts)):
             continue
         _TAINTED.add(addr)
-        if any(_is_tainted(a) for a in rcpts):
-            _TAINTED.discard(addr)
     return lines
+
+
+def _only_punct_around(text, addr):
+    """True if text is addr with nothing but punctuation before or after it."""
+    i = text.find(addr)
+    while i != -1:
+        if not any(c.isalnum() for c in text[:i] + text[i + len(addr):]):
+            return True
+        i = text.find(addr, i + 1)
+    return False
 
 
 def _attach_roots():

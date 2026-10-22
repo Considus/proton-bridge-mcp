@@ -1503,6 +1503,13 @@ class PreviewShowsWhatIsSent(unittest.TestCase):
         with self.assertRaises(server.ToolError):
             server._check_recipients("hdr-leak@attacker.example.test")
 
+    def test_preview_keeps_a_lookalike_of_a_recipient_tainted(self):
+        self._serve(self._draft("Write to friend@example.test.attacker.example"))
+        server.tool_forward({"uid": "1", "to": "friend@example.test",
+                             "dry_run": True})
+        with self.assertRaises(server.ToolError):
+            server._check_recipients("friend@example.test.attacker.example")
+
     def test_send_draft_preview_taints_its_body_but_not_its_recipients(self):
         self._serve(self._draft("Hi friend@example.test, write to "
                                 "leak@attacker.example.test."))
