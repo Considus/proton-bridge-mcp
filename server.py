@@ -1578,11 +1578,14 @@ def tool_update_draft(args):
         # here on a failure must not read as a failed update, or a retry
         # saves a second copy.
         resynced = binned = False
+        kept = None
         try:
             resynced = _select_checked(conn, folder, None,
                                        readonly=False) != validity
             if not resynced:
                 binned = _bin_to_trash(conn, uid, _special_folder(conn, "trash"))
+        except ToolError as e:
+            kept = str(e).splitlines()[0]
         except Exception:
             binned = False
     finally:
@@ -1597,6 +1600,9 @@ def tool_update_draft(args):
                  "resynced, so uid %s may now be a different message. Find "
                  "the old version with search_mail and remove it with "
                  "delete_draft." % (folder, uid))
+    elif kept:
+        where = ("The previous version is still in '%s' as uid %s: %s"
+                 % (folder, uid, kept))
     else:
         where = ("The previous version could not be moved to Trash and is "
                  "still in '%s' as uid %s." % (folder, uid))
@@ -1692,16 +1698,20 @@ def tool_send_draft(args):
 
     # The message has gone. A cleanup failure from here on must not read as a
     # failed send, or a retry sends it twice.
-    problem, resynced = None, False
+    problem, resynced, kept = None, False, None
     try:
         conn = imap_connect()
         try:
             folder = _drafts_folder_of(args, conn)
             resynced = _select_checked(conn, folder, None,
                                        readonly=False) != validity
-            if not resynced and not _bin_to_trash(
-                    conn, uid, _special_folder(conn, "trash")):
-                problem = "the server refused it"
+            if not resynced:
+                try:
+                    if not _bin_to_trash(conn, uid,
+                                         _special_folder(conn, "trash")):
+                        problem = "the server refused it"
+                except ToolError as e:
+                    kept = str(e).splitlines()[0]
         finally:
             try:
                 conn.logout()
@@ -1714,6 +1724,9 @@ def tool_send_draft(args):
                 "'%s' was resynced, so uid %s may now be a different message. "
                 "Do not send it again; find it with search_mail and remove it "
                 "with delete_draft." % (folder, uid))
+    elif kept:
+        note = ("The message WAS SENT. The draft is still in '%s' as uid %s: "
+                "%s Do not send it again." % (folder, uid, kept))
     elif problem:
         note = ("The message WAS SENT, but the draft could not be moved to "
                 "Trash (%s). It is still in '%s' as uid %s. Do not send it "

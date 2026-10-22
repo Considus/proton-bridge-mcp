@@ -2080,6 +2080,15 @@ class ExpungeOnlyTheTarget(unittest.TestCase):
         self.assertIn("WAS SENT", out)
         self.assertIn("still in 'Drafts' as uid 5", out)
 
+    def test_draft_refusals_say_a_copy_is_already_in_trash(self):
+        out = server.tool_update_draft({"uid": "5", "folder": "Drafts",
+                                        "body": "new body"})
+        self.assertIn("copy is already in 'Trash'", out)
+        out = server.tool_send_draft({"uid": "5", "folder": "Drafts",
+                                      "confirmed": True})
+        self.assertIn("copy is already in 'Trash'", out)
+        self.assertNotIn("remove it with delete_draft", out)
+
     def test_drop_label_copy_keeps_other_deleted_mail(self):
         conn = self.Server(self)
         conn.select("Labels/X")
