@@ -3925,7 +3925,8 @@ TOOLS = [
         "name": "search_mail",
         "description": "Search a folder. Combine any of: text, from, subject, "
                        "since (DD-Mon-YYYY), unread_only, flagged_only. Returns "
-                       "uids + envelopes, newest first. Set include_locations to "
+                       "uids + envelopes, newest first. With no filters it lists "
+                       "the newest messages in the folder. Set include_locations to "
                        "also report which labels and folders each message carries. "
                        "Set all_folders to search every mailbox at once when you "
                        "do not know where something is: duplicates collapse by "

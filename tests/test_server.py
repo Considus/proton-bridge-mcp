@@ -962,6 +962,32 @@ class SearchAllFolders(unittest.TestCase):
         self.assertEqual(seen, [(None, "UNSEEN", "FROM", '"bank"')])
 
 
+class SearchMailWithoutFilters(unittest.TestCase):
+    """search_mail with no filters is how to list a folder's newest mail, and
+    its description has to say so or a client never finds that out."""
+
+    def test_description_says_so(self):
+        desc = {t["name"]: t["description"] for t in server.TOOL_DEFS}
+        self.assertIn("With no filters it lists the newest messages in the "
+                      "folder.", desc["search_mail"])
+
+    def test_no_filters_searches_all_and_lists_newest_first(self):
+        seen = []
+        fake = SearchAllFolders._fake(None, 20)
+        real = fake.uid
+
+        def uid(cmd, *args):
+            if cmd.upper() == "SEARCH":
+                seen.append(args)
+            return real(cmd, *args)
+        fake.uid = uid
+        with mock.patch.object(server, "imap_connect", return_value=fake):
+            out = server.tool_search_mail({})
+        self.assertEqual(seen, [(None, "ALL")])
+        self.assertLess(out.index("[uid 20]"), out.index("[uid 19]"))
+        self.assertNotIn("[uid 5]", out)
+
+
 class SearchAllMailRanking(unittest.TestCase):
     """An all_folders search keeps the most recent arrivals. The sender writes
     the Date header, so a forged date must not take the top slots and push mail
