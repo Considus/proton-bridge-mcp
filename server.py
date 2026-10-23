@@ -374,7 +374,7 @@ def _replace_state(state):
         pass
 
 
-_SEND_TOOLS = {"send", "forward", "reply", "reply_all", "send_draft", "unsubscribe"}
+_SEND_TOOLS = {"send", "forward", "reply", "send_draft", "unsubscribe"}
 
 
 def _rate_check(tool, n=1):
@@ -598,6 +598,13 @@ _LIST_LINE = re.compile(
 
 def _parse_list_line(raw):
     """-> (flags_lower, name) for one LIST line, or None if it doesn't parse."""
+    parsed = _parse_list_entry(raw)
+    return None if parsed is None else (parsed[0], parsed[2])
+
+
+def _parse_list_entry(raw):
+    """-> (flags_lower, delimiter, name) for one LIST line, or None if it
+    doesn't parse. The delimiter is None when the server reports NIL."""
     if not isinstance(raw, (bytes, bytearray, str)):
         # None, or the tuple imaplib yields when a name arrives as a literal.
         # That needs UTF8=ACCEPT, which this server never enables, so it should
@@ -613,7 +620,10 @@ def _parse_list_line(raw):
         name = m.group("aname")
     else:
         name = name.replace('\\"', '"').replace("\\\\", "\\")
-    return m.group("flags").lower(), name
+    delim = m.group("delim")
+    if delim is not None:
+        delim = delim.replace('\\"', '"').replace("\\\\", "\\")
+    return m.group("flags").lower(), delim, name
 
 
 def _list_folders(conn):
@@ -881,6 +891,8 @@ def _selected_uids(conn, mid):
 # Tool handlers
 # ----------------------------------------------------------------------------
 def tool_list_folders(args):
+    if args.get("folder"):
+        return _folder_status(args)
     conn = imap_connect()
     try:
         folders = _list_folders(conn)
@@ -901,6 +913,15 @@ def tool_list_folders(args):
 
 
 def tool_search_mail(args):
+    if args.get("all_folders"):
+        clash = [k for k in ("folder", "uidvalidity", "include_locations")
+                 if args.get(k)]
+        if clash:
+            raise ToolError(
+                "all_folders searches every mailbox, so it takes no %s. Every "
+                "row already names its mailbox, its uidvalidity and the other "
+                "mailboxes it is in." % " or ".join(clash))
+        return _search_all_mail(args)
     folder = args.get("folder", "INBOX")
     limit = int(args.get("limit", 15))
     conn = imap_connect()
@@ -966,7 +987,7 @@ def _sort_key(env):
         return 0.0
 
 
-def tool_search_all_mail(args):
+def _search_all_mail(args):
     """Search every selectable mailbox and collapse duplicates.
 
     In Proton a message lives in one folder but also appears under each label
@@ -1621,11 +1642,7 @@ def _do_reply(args, reply_all):
 
 
 def tool_reply(args):
-    return _do_reply(args, reply_all=False)
-
-
-def tool_reply_all(args):
-    return _do_reply(args, reply_all=True)
+    return _do_reply(args, reply_all=bool(args.get("all")))
 
 
 def tool_create_draft(args):
@@ -2028,19 +2045,38 @@ def tool_unsubscribe(args):
            "\n\nWorth knowing: " + advice[-1] if aliased else ""))
 
 
+def _one_or_many(args, single, plural):
+    """True when a call names several targets under `plural` (uids, labels),
+    False when it names one under `single` (uid, label). Never both, so a call
+    cannot be read two ways."""
+    one = args.get(single) is not None
+    many = args.get(plural) is not None
+    if one and many:
+        raise ToolError("Pass '%s' for one or '%s' for several, not both. "
+                        "Nothing was changed." % (single, plural))
+    if not one and not many:
+        raise ToolError("'%s' is required, or '%s' to act on several."
+                        % (single, plural))
+    return many
+
+
+_MARK_FLAGS = {
+    "read": ("+FLAGS", r"(\Seen)"),
+    "unread": ("-FLAGS", r"(\Seen)"),
+    "star": ("+FLAGS", r"(\Flagged)"),
+    "unstar": ("-FLAGS", r"(\Flagged)"),
+}
+
+
 def tool_mark(args):
+    if _one_or_many(args, "uid", "uids"):
+        return _mark_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     action = args["action"]  # read | unread | star | unstar
-    mapping = {
-        "read": ("+FLAGS", r"(\Seen)"),
-        "unread": ("-FLAGS", r"(\Seen)"),
-        "star": ("+FLAGS", r"(\Flagged)"),
-        "unstar": ("-FLAGS", r"(\Flagged)"),
-    }
-    if action not in mapping:
+    if action not in _MARK_FLAGS:
         raise ToolError("action must be one of: read, unread, star, unstar")
-    op, flag = mapping[action]
+    op, flag = _MARK_FLAGS[action]
     conn = imap_connect()
     try:
         dry = bool(args.get("dry_run"))
@@ -2092,6 +2128,8 @@ def _resolve_label(conn, label):
 
 def tool_apply_label(args):
     """Tag a message. The message stays where it is."""
+    if _one_or_many(args, "uid", "uids"):
+        return _apply_label_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     conn = imap_connect()
@@ -2214,6 +2252,8 @@ def _resolve_label_for_removal(conn, label, folder):
 
 def tool_remove_label(args):
     """Take a label off a message. The message stays where it is."""
+    if _one_or_many(args, "uid", "uids"):
+        return _remove_label_many(args)
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to remove a label without confirmed=true. "
                         "Preview it with dry_run=true first if you are unsure.")
@@ -2244,7 +2284,7 @@ def tool_remove_label(args):
             pass
 
 
-def tool_bulk_remove_label(args):
+def _remove_label_many(args):
     """Take one label off many messages. Gated, like the single version."""
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing a bulk label removal without confirmed=true. "
@@ -2310,6 +2350,8 @@ def tool_bulk_remove_label(args):
 
 def tool_move_to_folder(args):
     """Filing = MOVE into Folders/<name> (or Archive/Trash)."""
+    if _one_or_many(args, "uid", "uids"):
+        return _move_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     dest = args["to_folder"]
@@ -2960,22 +3002,28 @@ def tool_read_attachment(args):
             conn.logout()
         except Exception:
             pass
-    items = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
-    if not items:
-        raise ToolError("No document attachments on uid %s in '%s'." % (uid, folder))
-    if want:
-        match = [a for a in items if a["filename"].lower() == want.lower()] or \
-                [a for a in items if want.lower() in a["filename"].lower()]
-        if not match:
-            raise ToolError("No attachment matching '%s'. Present: %s"
-                            % (want, ", ".join(a["filename"] for a in items)))
-        att = match[0]
-    elif len(items) == 1:
-        att = items[0]
+    if args.get("include_inline"):
+        att = _pick_attachment(raw, want, include_inline=True)
     else:
-        raise ToolError("Multiple attachments — name one via 'filename': %s"
-                        % ", ".join(a["filename"] for a in items))
+        items = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
+        if not items and not want:
+            raise ToolError("No document attachments on uid %s in '%s'. Name "
+                            "one via 'filename', or pass include_inline=true "
+                            "to include inline images." % (uid, folder))
+        if want:
+            match = [a for a in items if a["filename"].lower() == want.lower()] or \
+                    [a for a in items if want.lower() in a["filename"].lower()]
+            # A name no document has may be an inline image, which
+            # view_attachment always searched.
+            att = match[0] if match else _pick_attachment(raw, want, include_inline=True)
+        elif len(items) == 1:
+            att = items[0]
+        else:
+            raise ToolError("Multiple attachments — name one via 'filename': %s"
+                            % ", ".join(a["filename"] for a in items))
 
+    if att["ctype"].startswith("image/"):
+        return _image_result(att)
     if att["size"] > MAX_ATTACH_BYTES:
         raise ToolError("'%s' is %d bytes, over the %d MB cap. Raise "
                         "PROTON_MAX_ATTACH_MB if you trust this message."
@@ -2987,8 +3035,9 @@ def tool_read_attachment(args):
                                                 "message/rfc822", "text/calendar"):
         text = data.decode("utf-8", "replace")[:20000]
     else:
-        raise ToolError("'%s' is %s — not text-extractable. Use save_attachment "
-                        "to write it to disk and open it." % (att["filename"], ctype))
+        raise ToolError("'%s' is %s — neither text nor an image. Use "
+                        "save_attachment to write it to disk and open it."
+                        % (att["filename"], ctype))
     _taint_text(text)
     return "%s--- %s (%s, %d bytes) ---\n\n%s" % (
         UNTRUSTED_BANNER, att["filename"], ctype, att["size"], text)
@@ -3012,32 +3061,14 @@ def _pick_attachment(raw, want, include_inline=False):
                     % ", ".join(a["filename"] for a in items))
 
 
-def tool_view_attachment(args):
-    """Return an image attachment as a viewable image.
+def _image_result(att):
+    """An image attachment as a viewable image.
 
     Images only, deliberately. A client hands an image block to the model as a
     real image, so this is the only way to actually look at a photo or a scan.
     Base64 of anything else is just characters in the conversation that the
     model cannot interpret, at a third more bytes than the file itself, so
-    those are pushed back to read_attachment or save_attachment instead."""
-    folder = args.get("folder", "INBOX")
-    uid = _uidval(args["uid"])
-    conn = imap_connect()
-    try:
-        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-    att = _pick_attachment(raw, args.get("filename"), include_inline=True)
-    if not att["ctype"].startswith("image/"):
-        raise ToolError(
-            "'%s' is %s, not an image. This tool only returns images, because "
-            "base64 of anything else costs a third more than the file itself "
-            "and the model cannot read it. Use read_attachment for text and "
-            "PDFs, or save_attachment to put it on disk."
-            % (att["filename"], att["ctype"]))
+    read_attachment returns those as text or sends them to save_attachment."""
     if att["size"] > MAX_FETCH_BYTES:
         raise ToolError(
             "'%s' is %.1f MB, over the %d MB limit for inline images. Use "
@@ -3309,13 +3340,11 @@ def _bulk(args, verb, apply_one, readonly=False, check=None):
     return out
 
 
-def tool_bulk_mark(args):
+def _mark_many(args):
     action = args["action"]
-    mapping = {"read": ("+FLAGS", r"(\Seen)"), "unread": ("-FLAGS", r"(\Seen)"),
-               "star": ("+FLAGS", r"(\Flagged)"), "unstar": ("-FLAGS", r"(\Flagged)")}
-    if action not in mapping:
+    if action not in _MARK_FLAGS:
         raise ToolError("action must be one of: read, unread, star, unstar")
-    op, flag = mapping[action]
+    op, flag = _MARK_FLAGS[action]
 
     def one(conn, uid):
         typ, resp = conn.uid("STORE", uid, op, flag)
@@ -3324,7 +3353,7 @@ def tool_bulk_mark(args):
     return _bulk(args, "mark as %s" % action, one)
 
 
-def tool_bulk_apply_label(args):
+def _apply_label_many(args):
     label = args["label"]
     resolved = {}
 
@@ -3339,7 +3368,7 @@ def tool_bulk_apply_label(args):
     return _bulk(args, "label '%s'" % label, one, check=check)
 
 
-def tool_bulk_move(args):
+def _move_many(args):
     """Gated: relocating a batch (Trash included) is the highest-blast-radius
     thing here. Marking and labelling are trivially reversible, this isn't."""
     if not args.get("dry_run") and not args.get("confirmed"):
@@ -3402,7 +3431,9 @@ def tool_poll_mailbox(args):
     only safe move is to start again from the new head rather than guess.
 
     Nothing is marked read. Pass advance=false to look without committing, then
-    confirm with ack_folder once the batch is genuinely handled."""
+    confirm with commit once the batch is genuinely handled."""
+    if args.get("commit") is not None:
+        return _commit_checkpoint(args)
     folder = args.get("folder", "INBOX")
     limit = max(1, min(int(args.get("limit", 20)), 100))
     advance = args.get("advance", True)
@@ -3459,11 +3490,11 @@ def tool_poll_mailbox(args):
             _write_state(state)
             tail = "Cursor advanced to uid %d." % batch[-1]
         else:
-            # Remember the furthest checkpoint issued, so ack_folder can
+            # Remember the furthest checkpoint issued, so a commit can
             # refuse a uid no poll reported.
             cursor["issued"] = max(int(cursor.get("issued", 0)), batch[-1])
             _write_state(state)
-            tail = ("Cursor NOT moved. Call ack_folder with checkpoint '%s' "
+            tail = ("Cursor NOT moved. Call poll_folder with commit '%s' "
                     "once these are handled; until then another poll returns "
                     "the same batch." % checkpoint)
         return ("%d new message(s) in '%s'%s:\n\n%s\n\n%s"
@@ -3477,13 +3508,13 @@ def tool_poll_mailbox(args):
             pass
 
 
-def tool_ack_mailbox(args):
+def _commit_checkpoint(args):
     """Commit a checkpoint from poll_folder. Safe to repeat."""
     folder = args.get("folder", "INBOX")
-    checkpoint = str(args.get("checkpoint", "")).strip()
+    checkpoint = str(args.get("commit", "")).strip()
     validity, _, uid = checkpoint.partition(":")
     if not validity or not uid.isdigit():
-        raise ToolError("checkpoint should look like '<uidvalidity>:<uid>', "
+        raise ToolError("commit should look like '<uidvalidity>:<uid>', "
                         "exactly as poll_folder reported it.")
     state = _read_state()
     cursor = (state.get("cursors") or {}).get(folder) or {}
@@ -3500,14 +3531,14 @@ def tool_ack_mailbox(args):
         raise ToolError(
             "poll_folder has not reported uid %s for '%s', so that checkpoint "
             "was not issued by it. Nothing was changed. Call poll_folder with "
-            "advance=false and ack the checkpoint it reports." % (uid, folder))
+            "advance=false and commit the checkpoint it reports." % (uid, folder))
     cursor = dict(cursor, uidvalidity=validity, last_uid=int(uid))
     state.setdefault("cursors", {})[folder] = cursor
     _write_state(state)
     return "Cursor for '%s' committed at uid %s." % (folder, uid)
 
 
-def tool_folder_status(args):
+def _folder_status(args):
     """Counts plus the UIDVALIDITY that every uid in this folder depends on."""
     folder = args.get("folder", "INBOX")
     conn = imap_connect()
@@ -3557,6 +3588,89 @@ def tool_create_mailbox(args):
         if typ != "OK":
             raise ToolError("Create failed for '%s': %s" % (target, resp))
         return "Created %s '%s'." % (kind, target)
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+# Every RFC 6154 SPECIAL-USE flag. A mailbox carrying one is the server's own,
+# so renaming it is refused even where _SPECIAL has no entry for it.
+_SPECIAL_USE_FLAGS = (r"\all", r"\archive", r"\drafts", r"\flagged",
+                      r"\important", r"\junk", r"\sent", r"\trash")
+
+
+def _is_special_mailbox(name, flags=""):
+    """INBOX, or a mailbox the server marks as special or that _special_folder
+    would take for one by its name."""
+    return (name.upper() == "INBOX"
+            or any(f in flags.split() for f in _SPECIAL_USE_FLAGS)
+            or any(name.lower() in names for _flag, names in _SPECIAL.values()))
+
+
+def tool_rename_mailbox(args):
+    """Rename a folder or label where it stands. GATED, like creating one: it
+    changes mailbox structure, and the request may originate from untrusted
+    email content. The new name is a leaf, so a label stays a label and a
+    folder keeps its parent, and nothing here can move one mailbox under
+    another or onto a special one."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to rename a folder or label without "
+                        "confirmed=true. Show the user the old and new names, "
+                        "get a yes first.")
+    name = (args.get("name") or "").strip()
+    new_name = (args.get("new_name") or "").strip()
+    if not name or not new_name:
+        raise ToolError("'name' and 'new_name' are both required.")
+    _imap_str(name, "name")
+    if re.search(r'[/\\"\x00-\x1f]', new_name):
+        raise ToolError("new_name may not contain slashes, quotes or control "
+                        "characters. It is the new name only, without a "
+                        "'Labels/' or 'Folders/' prefix.")
+    conn = imap_connect()
+    try:
+        typ, data = conn.list()
+        boxes = {}
+        for raw in (data or []) if typ == "OK" else []:
+            parsed = _parse_list_entry(raw)
+            if parsed is not None:
+                boxes[parsed[2]] = parsed[:2]
+        if name not in boxes:
+            raise ToolError("No folder or label called '%s'. Run list_folders "
+                            "for exact names." % name)
+        flags, delim = boxes[name]
+        if _is_special_mailbox(name, flags):
+            raise ToolError(
+                "'%s' is one of the server's own mailboxes (INBOX, Sent, "
+                "Drafts, Trash, Spam, Archive, All Mail and the like). Mail "
+                "is filed there by name, so it is not renamed here." % name)
+        if name in ("Labels", "Folders") and any(
+                b.startswith(name + "/") for b in boxes):
+            raise ToolError("'%s' is the namespace itself, not a folder or "
+                            "label." % name)
+        if delim and delim in new_name:
+            raise ToolError("new_name may not contain '%s', the hierarchy "
+                            "separator on this server." % delim)
+        parent = name.rsplit(delim, 1)[0] + delim if delim and delim in name else ""
+        target = parent + new_name
+        if target == name:
+            return "'%s' already has that name, nothing to do." % name
+        if _is_special_mailbox(target):
+            raise ToolError("'%s' is the name of one of the server's own "
+                            "mailboxes, so nothing is renamed to it." % target)
+        clash = [b for b in boxes if b.lower() == target.lower() and b != name]
+        if clash:
+            raise ToolError("'%s' already exists. Nothing was renamed."
+                            % clash[0])
+        if args.get("dry_run"):
+            return _dry("rename '%s'" % name,
+                        ["to '%s'" % target,
+                         "the mail in it stays in it, under the new name"])
+        typ, resp = conn.rename(_folder_quote(name), _folder_quote(target))
+        if typ != "OK":
+            raise ToolError("Rename of '%s' failed: %s" % (name, resp))
+        return "Renamed '%s' to '%s'." % (name, target)
     finally:
         try:
             conn.logout()
@@ -3683,6 +3797,8 @@ def _parse_labels(args):
 
 def tool_delete_label(args):
     """Delete a label outright. Every message keeps its place and loses the tag."""
+    if _one_or_many(args, "label", "labels"):
+        return _delete_labels_many(args)
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to delete a label without confirmed=true. "
                         "Preview it with dry_run=true first to see how many "
@@ -3708,7 +3824,7 @@ def tool_delete_label(args):
             pass
 
 
-def tool_bulk_delete_labels(args):
+def _delete_labels_many(args):
     """Delete several labels in one pass. Same rules as delete_label."""
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to delete labels without confirmed=true. "
@@ -3763,57 +3879,46 @@ TOOLS = [
         "name": "list_folders",
         "description": "List all Proton folders and labels available over the "
                        "Bridge. Call this first to learn exact folder/label "
-                       "names for filing and tagging.",
-        "inputSchema": {"type": "object", "properties": {}},
-        "handler": tool_list_folders,
-    },
-    {
-        "name": "folder_status",
-        "description": "Message counts plus UIDNEXT and UIDVALIDITY for a folder. "
-                       "UIDs are only valid within one UIDVALIDITY generation, so "
-                       "check this before acting on uids noted earlier.",
+                       "names for filing and tagging. Pass folder to get that "
+                       "folder's message counts plus UIDNEXT and UIDVALIDITY "
+                       "instead: UIDs are only valid within one UIDVALIDITY "
+                       "generation, so check it before acting on uids noted "
+                       "earlier.",
         "inputSchema": {
             "type": "object",
-            "properties": {"folder": {"type": "string", "description": "Default INBOX."}},
+            "properties": {"folder": {"type": "string", "description": "Report this one folder's counts and UIDVALIDITY instead of listing every folder."}},
         },
-        "handler": tool_folder_status,
+        "handler": tool_list_folders,
     },
     {
         "name": "poll_folder",
         "description": "Messages that have arrived since the last poll. The very "
                        "first poll emits nothing and just records where the "
                        "mailbox ends, so turning this on does not replay the "
-                       "backlog. Marks nothing as read.",
+                       "backlog. Marks nothing as read. Pass commit to commit "
+                       "a checkpoint an advance=false poll returned; repeating "
+                       "that is harmless.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "limit": {"type": "integer", "description": "Most per call, 1 to 100 (default 20)."},
-                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with ack_folder."},
+                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with commit."},
+                "commit": {"type": "string", "description": "A checkpoint '<uidvalidity>:<uid>', exactly as an advance=false poll reported it. Commits it instead of polling."},
             },
         },
         "handler": tool_poll_mailbox,
     },
     {
-        "name": "ack_folder",
-        "description": "Commit a checkpoint returned by poll_folder with "
-                       "advance=false. Repeating it is harmless.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folder": {"type": "string", "description": "Default INBOX."},
-                "checkpoint": {"type": "string", "description": "Exactly as poll_folder reported it."},
-            },
-            "required": ["checkpoint"],
-        },
-        "handler": tool_ack_mailbox,
-    },
-    {
         "name": "search_mail",
         "description": "Search a folder. Combine any of: text, from, subject, "
                        "since (DD-Mon-YYYY), unread_only, flagged_only. Returns "
-                       "uids + envelopes, newest first. Set include_locations to "
-                       "also report which labels and folders each message carries.",
+                       "uids + envelopes, newest first. With no filters it lists "
+                       "the newest messages in the folder. Set include_locations to "
+                       "also report which labels and folders each message carries. "
+                       "Set all_folders to search every mailbox at once when you "
+                       "do not know where something is: duplicates collapse by "
+                       "Message-ID and each row says where the message lives.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3825,32 +3930,13 @@ TOOLS = [
                 "before": {"type": "string", "description": "DD-Mon-YYYY. Combine with since for a date range."},
                 "unread_only": {"type": "boolean"},
                 "flagged_only": {"type": "boolean"},
-                "limit": {"type": "integer", "description": "Max results (default 15)."},
+                "limit": {"type": "integer", "description": "Max results (default 15, or the most recent 25 with all_folders)."},
+                "all_folders": {"type": "boolean", "description": "Search every mailbox instead of one folder. Takes no folder, uidvalidity or include_locations."},
                 "include_locations": {"type": "boolean", "description": "Report every other mailbox each message appears in, so you can tell what it is already labelled or filed as without a second search. Costs one search per mailbox."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
             },
         },
         "handler": tool_search_mail,
-    },
-    {
-        "name": "search_all_mail",
-        "description": "Search every mailbox at once and collapse duplicates by "
-                       "Message-ID, reporting where each message lives. Use when "
-                       "you do not know which folder something is in.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "from": {"type": "string"},
-                "subject": {"type": "string"},
-                "since": {"type": "string", "description": "DD-Mon-YYYY."},
-                "before": {"type": "string", "description": "DD-Mon-YYYY. Combine with since for a date range."},
-                "unread_only": {"type": "boolean"},
-                "flagged_only": {"type": "boolean"},
-                "limit": {"type": "integer", "description": "Most recent N (default 25)."},
-            },
-        },
-        "handler": tool_search_all_mail,
     },
     {
         "name": "get_headers",
@@ -3904,9 +3990,12 @@ TOOLS = [
     },
     {
         "name": "read_attachment",
-        "description": "Extract an attachment's TEXT inline — PDFs via pypdf, plus "
-                       "text/csv/json/ics/eml. Use for invoices, decks, reports. "
-                       "Binary/image types must use save_attachment instead.",
+        "description": "Read an attachment inline. Text comes back as text: "
+                       "PDFs via pypdf, plus text/csv/json/ics/eml, for invoices, "
+                       "decks, reports. An image comes back as a viewable image, "
+                       "the only way to see a photo or a scan when the client "
+                       "cannot read local files. Other binary types must use "
+                       "save_attachment instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3914,28 +4003,11 @@ TOOLS = [
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "filename": {"type": "string", "description": "Which attachment (partial match OK). Optional if there is only one."},
+                "include_inline": {"type": "boolean", "description": "Also consider inline images and PGP keys, which are hidden by default. A filename no document matches is looked for among them anyway."},
             },
             "required": ["uid"],
         },
         "handler": tool_read_attachment,
-    },
-    {
-        "name": "view_attachment",
-        "description": "Look at an image attachment. Returns it as a viewable "
-                       "image, which is the only way to see a photo or a scan "
-                       "when the client cannot read local files. Images only, "
-                       "use read_attachment for text and PDFs.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uid": {"type": "string"},
-                "folder": {"type": "string", "description": "Default INBOX."},
-                "uidvalidity": {"type": "string"},
-                "filename": {"type": "string", "description": "Which image; partial match is fine."},
-            },
-            "required": ["uid"],
-        },
-        "handler": tool_view_attachment,
     },
     {
         "name": "save_attachment",
@@ -3988,63 +4060,12 @@ TOOLS = [
         "handler": tool_find_thread,
     },
     {
-        "name": "bulk_mark",
-        "description": "Mark many messages read/unread/starred in one pass. "
-                       "Far cheaper than one call per message.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
-            },
-            "required": ["uids", "action"],
-        },
-        "handler": tool_bulk_mark,
-    },
-    {
-        "name": "bulk_apply_label",
-        "description": "Apply one existing label to many messages. Messages stay "
-                       "where they are.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
-            },
-            "required": ["uids", "label"],
-        },
-        "handler": tool_bulk_apply_label,
-    },
-    {
-        "name": "bulk_move",
-        "description": "File or Trash many messages at once. GATED: preview with "
-                       "dry_run=true, show the user, then call with confirmed=true.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "to_folder": {"type": "string"},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["uids", "to_folder", "confirmed"],
-        },
-        "handler": tool_bulk_move,
-    },
-    {
         "name": "reply",
         "description": "Reply to one message with correct threading. Replies to "
                        "the Reply-To address when there is one, so alias mail stays "
-                       "masked. Pass draft=true to save it for review, or "
-                       "confirmed=true to send.",
+                       "masked. Pass all=true to reply to everyone, with your own "
+                       "addresses removed from Cc and duplicates dropped. Pass "
+                       "draft=true to save it for review, or confirmed=true to send.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4053,6 +4074,7 @@ TOOLS = [
                 "uid": {"type": "string"},
                 "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "all": {"type": "boolean", "description": "Reply to everyone on the message, not just the sender. Default false."},
                 "body": {"type": "string", "description": "Your reply text. The original is quoted beneath unless quote=false."},
                 "subject": {"type": "string", "description": "Override the auto 'Re: ...' subject."},
                 "quote": {"type": "boolean", "description": "Quote the original beneath your reply. Default true."},
@@ -4063,30 +4085,6 @@ TOOLS = [
             "required": ["uid", "body"],
         },
         "handler": tool_reply,
-    },
-    {
-        "name": "reply_all",
-        "description": "Reply to everyone on a message, with your own addresses "
-                       "removed from Cc and duplicates dropped. Same draft and "
-                       "confirmation rules as reply.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "attach": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path. Only from the allowed source directories."},
-                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
-                "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "body": {"type": "string", "description": "Your reply text. The original is quoted beneath unless quote=false."},
-                "subject": {"type": "string", "description": "Override the auto 'Re: ...' subject."},
-                "quote": {"type": "boolean", "description": "Quote the original beneath your reply. Default true."},
-                "from_address": {"type": "string", "description": "Must be on the sender allowlist. Left unset, alias mail automatically uses the alias-owner address."},
-                "draft": {"type": "boolean", "description": "Save to Drafts instead of sending. Needs no confirmation because nothing goes out."},
-                "confirmed": {"type": "boolean", "description": "Required to actually send. Not needed when draft=true."},
-            },
-            "required": ["uid", "body"],
-        },
-        "handler": tool_reply_all,
     },
     {
         "name": "create_draft",
@@ -4188,89 +4186,79 @@ TOOLS = [
     },
     {
         "name": "mark",
-        "description": "Mark a message read/unread or star/unstar.",
+        "description": "Mark one message (uid) or many in one pass (uids) "
+                       "read/unread or star/unstar.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
             },
-            "required": ["uid", "action"],
+            "required": ["action"],
         },
         "handler": tool_mark,
     },
     {
         "name": "apply_label",
-        "description": "Tag a message with an existing label. The message stays "
-                       "where it is.",
+        "description": "Tag one message (uid) or many (uids) with an existing "
+                       "label. Messages stay where they are.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
             },
-            "required": ["uid", "label"],
+            "required": ["label"],
         },
         "handler": tool_apply_label,
     },
     {
         "name": "remove_label",
-        "description": "Take a label off a message. The message itself stays "
-                       "where it is. GATED: removing a label ends in an expunge "
-                       "against the label mailbox, so confirm it or preview with "
-                       "dry_run=true first.",
+        "description": "Take a label off one message (uid) or many (uids). The "
+                       "messages stay where they are. GATED: removing a label "
+                       "ends in an expunge against the label mailbox, so confirm "
+                       "it or preview with dry_run=true first.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Folder the message lives in, default INBOX."},
                 "label": {"type": "string", "description": "The label to take off. On Proton the Labels/ prefix is optional."},
                 "confirmed": {"type": "boolean"},
             },
-            "required": ["uid", "label"],
+            "required": ["label"],
         },
         "handler": tool_remove_label,
     },
     {
-        "name": "bulk_remove_label",
-        "description": "Take one label off many messages at once. The messages "
-                       "stay where they are. GATED, like remove_label.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "label": {"type": "string", "description": "The label to take off. On Proton the Labels/ prefix is optional."},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["uids", "label"],
-        },
-        "handler": tool_bulk_remove_label,
-    },
-    {
         "name": "move_to_folder",
-        "description": "File a message: move it into another folder (e.g. "
-                       "'Folders/<name>', 'Archive', 'Trash').",
+        "description": "File one message (uid) or many (uids): move it into "
+                       "another folder (e.g. 'Folders/<name>', 'Archive', "
+                       "'Trash'). Many at once is GATED: preview with "
+                       "dry_run=true, show the user, then call with confirmed=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "to_folder": {"type": "string"},
+                "confirmed": {"type": "boolean", "description": "Required whenever uids is used."},
             },
-            "required": ["uid", "to_folder"],
+            "required": ["to_folder"],
         },
         "handler": tool_move_to_folder,
     },
@@ -4292,36 +4280,41 @@ TOOLS = [
         "handler": tool_create_mailbox,
     },
     {
+        "name": "rename_folder_or_label",
+        "description": "Rename a folder or label where it stands: a label stays "
+                       "a label and a folder keeps its parent. INBOX and the "
+                       "special mailboxes (Sent, Drafts, Trash, Spam, Archive, "
+                       "All Mail) are refused. GATED: confirm the old and new "
+                       "names with the user, then call with confirmed=true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+                "name": {"type": "string", "description": "The folder or label, exactly as list_folders shows it, e.g. 'Labels/Receipts'."},
+                "new_name": {"type": "string", "description": "The new name only, no 'Labels/' or 'Folders/' prefix."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["name", "new_name"],
+        },
+        "handler": tool_rename_mailbox,
+    },
+    {
         "name": "delete_label",
         "description": "Delete a label outright. Every message that carried it "
                        "stays exactly where it is and simply loses the tag — no "
                        "mail is deleted. Labels only; folders are where messages "
-                       "live and are not deletable here. GATED.",
+                       "live and are not deletable here. Pass label for one or "
+                       "labels for several. GATED.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "dry_run": {"type": "boolean", "description": "Preview it, including how many messages carry the label. Changes nothing, needs no confirmation."},
+                "dry_run": {"type": "boolean", "description": "Preview it, including how many messages carry each label. Changes nothing, needs no confirmation."},
                 "label": {"type": "string", "description": "The label to delete. On Proton the Labels/ prefix is optional."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Several label names, instead of label."},
                 "confirmed": {"type": "boolean"},
             },
-            "required": ["label"],
         },
         "handler": tool_delete_label,
-    },
-    {
-        "name": "bulk_delete_labels",
-        "description": "Delete several labels in one pass. Messages keep their "
-                       "place and lose the tags. Labels only, GATED.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "dry_run": {"type": "boolean", "description": "Preview each one, including how many messages carry it. Changes nothing."},
-                "labels": {"type": "array", "items": {"type": "string"}, "description": "Label names. On Proton the Labels/ prefix is optional."},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["labels"],
-        },
-        "handler": tool_bulk_delete_labels,
     },
     {
         "name": "send",
@@ -4371,19 +4364,20 @@ TOOLS = [
 
 MODE = _mode()
 _MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
+             "rename_folder_or_label",
              "move_to_folder", "apply_label", "remove_label", "mark",
-             "save_attachment", "bulk_mark", "bulk_apply_label",
-             "bulk_remove_label", "bulk_move", "reply", "reply_all",
+             "save_attachment", "reply",
              "update_draft", "delete_draft", "send_draft", "unsubscribe",
-             "delete_label", "bulk_delete_labels"}
+             "delete_label"}
 # _MUTATING is a statement about mail, and readonly has to take away more than
 # that. purge_attachments deletes files off the disk without ever touching the
 # mailbox, so it falls outside _MUTATING while plainly changing something, and
 # a mode called readonly cannot be the one that offers it.
 #
-# The polling pair stay. poll_folder and ack_folder write this server's own
-# checkpoint and nothing of yours, so removing them would cost the one workflow
-# readonly is for, watching a mailbox, to protect a file that is ours anyway.
+# poll_folder stays. It writes this server's own checkpoint, when it polls and
+# when it commits, and nothing of yours, so removing it would cost the one
+# workflow readonly is for, watching a mailbox, to protect a file that is ours
+# anyway.
 # That distinction is the whole reason this set is separate from _MUTATING.
 _READONLY_ALSO_REMOVES = {"purge_attachments"}
 if MODE == "readonly":
@@ -4398,50 +4392,41 @@ elif MODE == "organise":
 # ----------------------------------------------------------------------------
 # Not derived from _MUTATING, on purpose. That set is about mail: which tools
 # change the mailbox, and so which ones a mode should take away. readOnlyHint
-# asks a wider question, whether a tool changes anything at all, and three
-# tools fall the other side of that line. purge_attachments deletes files off
-# the disk and never touches the mailbox. poll_folder and ack_folder both write
-# the local checkpoint. Reusing _MUTATING here would have declared all three
-# read-only, which is the kind of wrong a reviewer takes at face value.
-_READ_ONLY = {"list_folders", "folder_status", "search_mail", "search_all_mail",
+# asks a wider question, whether a tool changes anything at all, and two tools
+# fall the other side of that line. purge_attachments deletes files off the
+# disk and never touches the mailbox. poll_folder writes the local checkpoint.
+# Reusing _MUTATING here would have declared both read-only, which is the kind
+# of wrong a reviewer takes at face value.
+_READ_ONLY = {"list_folders", "search_mail",
               "get_headers", "read_message", "list_attachments",
-              "read_attachment", "view_attachment", "find_thread"}
+              "read_attachment", "find_thread"}
 
 # Destroys something, or puts mail beyond recall.
-_DESTRUCTIVE = {"send", "forward", "reply", "reply_all", "send_draft",
+_DESTRUCTIVE = {"send", "forward", "reply", "send_draft",
                 "unsubscribe", "update_draft", "delete_draft", "delete_label",
-                "bulk_delete_labels", "purge_attachments"}
+                "purge_attachments"}
 
 # Running it twice lands in the same place as running it once.
-_IDEMPOTENT = {"ack_folder", "mark", "bulk_mark", "apply_label",
-               "bulk_apply_label", "remove_label", "bulk_remove_label",
-               "move_to_folder", "bulk_move", "create_folder_or_label",
-               "delete_label", "bulk_delete_labels", "delete_draft",
-               "update_draft", "save_attachment", "purge_attachments"}
+_IDEMPOTENT = {"mark", "apply_label", "remove_label",
+               "move_to_folder", "create_folder_or_label", "delete_label",
+               "delete_draft", "update_draft", "save_attachment",
+               "purge_attachments"}
 
 # Everything else reaches the mailbox, and a mailbox is whoever writes to it.
 _LOCAL_ONLY = {"purge_attachments"}
 
 TITLES = {
     "list_folders": "List folders and labels",
-    "folder_status": "Folder status",
     "poll_folder": "Poll for new mail",
-    "ack_folder": "Acknowledge poll checkpoint",
     "search_mail": "Search a folder",
-    "search_all_mail": "Search all mail",
     "get_headers": "Get message headers",
     "read_message": "Read a message",
     "list_attachments": "List attachments",
     "read_attachment": "Read an attachment",
-    "view_attachment": "View an image attachment",
     "save_attachment": "Save an attachment",
     "purge_attachments": "Delete saved attachments",
     "find_thread": "Find a thread",
-    "bulk_mark": "Mark messages in bulk",
-    "bulk_apply_label": "Apply a label in bulk",
-    "bulk_move": "Move messages in bulk",
     "reply": "Reply",
-    "reply_all": "Reply to all",
     "create_draft": "Create a draft",
     "update_draft": "Update a draft",
     "delete_draft": "Delete a draft",
@@ -4450,11 +4435,10 @@ TITLES = {
     "mark": "Mark a message",
     "apply_label": "Apply a label",
     "remove_label": "Remove a label",
-    "bulk_remove_label": "Remove a label in bulk",
     "move_to_folder": "Move to folder",
     "create_folder_or_label": "Create a folder or label",
+    "rename_folder_or_label": "Rename a folder or label",
     "delete_label": "Delete a label",
-    "bulk_delete_labels": "Delete labels in bulk",
     "send": "Send mail",
     "forward": "Forward",
 }
