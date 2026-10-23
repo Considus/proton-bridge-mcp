@@ -30,7 +30,7 @@ CI runs the same tests on Python 3.9 and 3.12, plus a compile check. A pull requ
 
 `--sync` writes the tool list and version into `manifest.json` from `server.py`, which is what you want after adding or renaming a tool. With no argument it checks, packs `dist/proton-bridge-mcp-<version>.mcpb`, and stamps the artifact's SHA-256 into `server.json`.
 
-Every tool needs a title and the right `readOnlyHint` or `destructiveHint`, and a directory submission is rejected without them. The classification sits next to `TOOLS` in `server.py` rather than being derived from `_MUTATING`, because that set is about which tools change the *mailbox*, and three tools that change something else fall the wrong side of it. Tests cover this.
+Every tool needs a title and the right `readOnlyHint` or `destructiveHint`, and a directory submission is rejected without them. The classification sits next to `TOOLS` in `server.py` rather than being derived from `_MUTATING`, because that set is about which tools change the *mailbox*, and the tools that change something else (deleting saved attachments, moving the polling checkpoint) fall the wrong side of it. Tests cover this.
 
 ## Releasing
 

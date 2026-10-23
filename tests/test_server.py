@@ -3231,24 +3231,24 @@ class PollingCursor(unittest.TestCase):
 
     def test_ack_rejects_a_malformed_checkpoint(self):
         with self.assertRaises(server.ToolError):
-            server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "nonsense"})
+            server.tool_poll_mailbox({"folder": "INBOX", "commit": "nonsense"})
 
     def test_ack_commits_then_is_idempotent(self):
-        first = server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:100"})
+        first = server.tool_poll_mailbox({"folder": "INBOX", "commit": "5:100"})
         self.assertIn("committed", first)
-        again = server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:100"})
+        again = server.tool_poll_mailbox({"folder": "INBOX", "commit": "5:100"})
         self.assertIn("Nothing to do", again)
 
     def test_ack_never_moves_the_cursor_backwards(self):
-        server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:100"})
-        server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:50"})
+        server.tool_poll_mailbox({"folder": "INBOX", "commit": "5:100"})
+        server.tool_poll_mailbox({"folder": "INBOX", "commit": "5:50"})
         self.assertEqual(
             server._read_state()["cursors"]["INBOX"]["last_uid"], 100)
 
     def test_checkpoint_from_another_generation_is_refused(self):
-        server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "5:100"})
+        server.tool_poll_mailbox({"folder": "INBOX", "commit": "5:100"})
         with self.assertRaises(server.ToolError) as cm:
-            server.tool_ack_mailbox({"folder": "INBOX", "checkpoint": "9:101"})
+            server.tool_poll_mailbox({"folder": "INBOX", "commit": "9:101"})
         self.assertIn("resynced", str(cm.exception))
 
     def test_state_is_written_owner_only(self):
@@ -3257,9 +3257,100 @@ class PollingCursor(unittest.TestCase):
             oct(os.stat(server.STATE_FILE).st_mode & 0o777), "0o600")
 
 
+class MergedFolderTools(unittest.TestCase):
+    """ack_folder became poll_folder with commit, and folder_status became
+    list_folders with folder."""
+
+    class Box:
+        def __init__(self):
+            self.calls = []
+        def list(self, *a):
+            return "OK", [b'(\\HasNoChildren) "/" "INBOX"',
+                          b'(\\HasNoChildren) "/" "Labels/Work"']
+        def status(self, mailbox, what):
+            self.calls.append(("STATUS", mailbox, what))
+            if mailbox != '"INBOX"':
+                return "NO", [b"no such mailbox"]
+            return "OK", [b'"INBOX" (MESSAGES 4 UNSEEN 1 UIDNEXT 10 '
+                          b'UIDVALIDITY 555)']
+        def logout(self):
+            pass
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._saved = (server.imap_connect, server.STATE_FILE)
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        self.box = self.Box()
+        server.imap_connect = lambda: self.box
+
+    def tearDown(self):
+        server.imap_connect, server.STATE_FILE = self._saved
+
+    def test_list_folders_with_a_folder_reports_its_status(self):
+        out = server.tool_list_folders({"folder": "INBOX"})
+        self.assertEqual(out, "INBOX\n  messages    4\n  unread      1\n"
+                              "  uidnext     10\n  uidvalidity 555  (pass this "
+                              "with any uid from this folder)")
+        self.assertEqual(self.box.calls, [
+            ("STATUS", '"INBOX"', "(MESSAGES UNSEEN UIDNEXT UIDVALIDITY)")])
+
+    def test_list_folders_without_a_folder_lists_them(self):
+        for args in ({}, {"folder": ""}, {"folder": None}):
+            with self.subTest(**args):
+                out = server.tool_list_folders(args)
+                self.assertIn("Labels/Work", out)
+                self.assertNotIn("uidvalidity", out)
+
+    def test_an_unknown_folder_is_refused(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_list_folders({"folder": "Nope"})
+        self.assertIn("Cannot read status for 'Nope'", str(cm.exception))
+
+    def test_commit_never_touches_the_mailbox(self):
+        server.imap_connect = mock.Mock(side_effect=AssertionError("connected"))
+        out = server.tool_poll_mailbox({"folder": "INBOX", "commit": "5:100"})
+        self.assertIn("committed at uid 100", out)
+        self.assertEqual(server._read_state()["cursors"]["INBOX"],
+                         {"uidvalidity": "5", "last_uid": 100})
+
+    def test_an_empty_commit_is_refused_not_polled(self):
+        server.imap_connect = mock.Mock(side_effect=AssertionError("connected"))
+        for bad in ("", "5", ":100", "5:", "5:abc"):
+            with self.subTest(commit=bad):
+                with self.assertRaises(server.ToolError) as cm:
+                    server.tool_poll_mailbox({"commit": bad})
+                self.assertIn("<uidvalidity>:<uid>", str(cm.exception))
+
+    def test_hints_take_the_stricter_of_each_pair(self):
+        ann = server._annotations("poll_folder")
+        self.assertFalse(ann["readOnlyHint"])
+        self.assertFalse(ann["destructiveHint"])
+        # poll_folder was not idempotent and ack_folder was: the merged tool
+        # claims the stricter, not idempotent.
+        self.assertFalse(ann["idempotentHint"])
+        self.assertNotIn("poll_folder", server._MUTATING)
+        self.assertTrue(server._annotations("list_folders")["readOnlyHint"])
+
+    def test_readonly_still_commits(self):
+        state = os.path.join(self.tmp, "rpc-state.json")
+        env = {"PROTON_READONLY": "1", "PROTON_SETTINGS_FILE": os.devnull,
+               "PROTON_STATE_FILE": state,
+               "PROTON_AUDIT_LOG": os.path.join(self.tmp, "audit.log"),
+               "PROTON_ATTACH_DIR": os.path.join(self.tmp, "attachments")}
+        msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                           "params": {"name": "poll_folder", "arguments": {
+                               "folder": "INBOX", "commit": "5:100"}}}],
+                   env=env)
+        res = [m for m in msgs if m.get("id") == 2][0]["result"]
+        self.assertFalse(res.get("isError"), res)
+        self.assertIn("committed at uid 100", res["content"][0]["text"])
+        with open(state) as f:
+            self.assertEqual(json.load(f)["cursors"]["INBOX"]["last_uid"], 100)
+
+
 class AckOnlyIssuedCheckpoints(unittest.TestCase):
-    """ack_folder commits a checkpoint poll_folder issued, never one made up.
-    An instruction planted in mail could otherwise ack a huge uid and stop
+    """A commit takes a checkpoint poll_folder issued, never one made up.
+    An instruction planted in mail could otherwise commit a huge uid and stop
     poll_folder reporting anything new in that folder."""
 
     class Mailbox:
@@ -3307,8 +3398,8 @@ class AckOnlyIssuedCheckpoints(unittest.TestCase):
         return server.tool_poll_mailbox({"folder": "INBOX", "advance": advance})
 
     def ack(self, checkpoint):
-        return server.tool_ack_mailbox({"folder": "INBOX",
-                                        "checkpoint": checkpoint})
+        return server.tool_poll_mailbox({"folder": "INBOX",
+                                         "commit": checkpoint})
 
     def test_inflated_ack_is_refused_and_new_mail_still_shows(self):
         self.poll()
@@ -4678,8 +4769,8 @@ class Annotations(unittest.TestCase):
         self.assertFalse(ann["openWorldHint"])
 
     def test_the_polling_pair_are_not_read_only(self):
-        # Both write the local checkpoint.
-        for name in ("poll_folder", "ack_folder"):
+        # It writes the local checkpoint, both polling and committing.
+        for name in ("poll_folder",):
             self.assertFalse(server._annotations(name)["readOnlyHint"])
 
     def test_sending_is_destructive_and_not_idempotent(self):
@@ -4717,8 +4808,8 @@ class Annotations(unittest.TestCase):
         # off the disk without ever touching the mailbox. A mode called
         # readonly cannot be the one that offers that, so it is removed too.
         #
-        # The polling pair stay, and are the only tools left here that write
-        # anything, because what they write is this server's own checkpoint
+        # poll_folder stays, and is the only tool left here that writes
+        # anything, because what it writes is this server's own checkpoint
         # rather than anything of the user's. If that reasoning changes, this
         # test is the thing to argue with first.
         msgs = rpc([INIT, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}],
@@ -4726,7 +4817,7 @@ class Annotations(unittest.TestCase):
         tools = [t for m in msgs if m.get("id") == 2 for t in m["result"]["tools"]]
         self.assertNotIn("purge_attachments", {t["name"] for t in tools})
         writing = {t["name"] for t in tools if not t["annotations"]["readOnlyHint"]}
-        self.assertEqual(writing, {"poll_folder", "ack_folder"})
+        self.assertEqual(writing, {"poll_folder"})
 
 
 class Manifest(unittest.TestCase):

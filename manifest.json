@@ -60,19 +60,11 @@
   "tools": [
     {
       "name": "list_folders",
-      "description": "List all Proton folders and labels available over the Bridge. Call this first to learn exact folder/label names for filing and tagging."
-    },
-    {
-      "name": "folder_status",
-      "description": "Message counts plus UIDNEXT and UIDVALIDITY for a folder. UIDs are only valid within one UIDVALIDITY generation, so check this before acting on uids noted earlier."
+      "description": "List all Proton folders and labels available over the Bridge. Call this first to learn exact folder/label names for filing and tagging. Pass folder to get that folder's message counts plus UIDNEXT and UIDVALIDITY instead: UIDs are only valid within one UIDVALIDITY generation, so check it before acting on uids noted earlier."
     },
     {
       "name": "poll_folder",
-      "description": "Messages that have arrived since the last poll. The very first poll emits nothing and just records where the mailbox ends, so turning this on does not replay the backlog. Marks nothing as read."
-    },
-    {
-      "name": "ack_folder",
-      "description": "Commit a checkpoint returned by poll_folder with advance=false. Repeating it is harmless."
+      "description": "Messages that have arrived since the last poll. The very first poll emits nothing and just records where the mailbox ends, so turning this on does not replay the backlog. Marks nothing as read. Pass commit to commit a checkpoint an advance=false poll returned; repeating that is harmless."
     },
     {
       "name": "search_mail",

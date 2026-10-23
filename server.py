@@ -881,6 +881,8 @@ def _selected_uids(conn, mid):
 # Tool handlers
 # ----------------------------------------------------------------------------
 def tool_list_folders(args):
+    if args.get("folder"):
+        return _folder_status(args)
     conn = imap_connect()
     try:
         folders = _list_folders(conn)
@@ -3431,7 +3433,9 @@ def tool_poll_mailbox(args):
     only safe move is to start again from the new head rather than guess.
 
     Nothing is marked read. Pass advance=false to look without committing, then
-    confirm with ack_folder once the batch is genuinely handled."""
+    confirm with commit once the batch is genuinely handled."""
+    if args.get("commit") is not None:
+        return _commit_checkpoint(args)
     folder = args.get("folder", "INBOX")
     limit = max(1, min(int(args.get("limit", 20)), 100))
     advance = args.get("advance", True)
@@ -3488,11 +3492,11 @@ def tool_poll_mailbox(args):
             _write_state(state)
             tail = "Cursor advanced to uid %d." % batch[-1]
         else:
-            # Remember the furthest checkpoint issued, so ack_folder can
+            # Remember the furthest checkpoint issued, so a commit can
             # refuse a uid no poll reported.
             cursor["issued"] = max(int(cursor.get("issued", 0)), batch[-1])
             _write_state(state)
-            tail = ("Cursor NOT moved. Call ack_folder with checkpoint '%s' "
+            tail = ("Cursor NOT moved. Call poll_folder with commit '%s' "
                     "once these are handled; until then another poll returns "
                     "the same batch." % checkpoint)
         return ("%d new message(s) in '%s'%s:\n\n%s\n\n%s"
@@ -3506,13 +3510,13 @@ def tool_poll_mailbox(args):
             pass
 
 
-def tool_ack_mailbox(args):
+def _commit_checkpoint(args):
     """Commit a checkpoint from poll_folder. Safe to repeat."""
     folder = args.get("folder", "INBOX")
-    checkpoint = str(args.get("checkpoint", "")).strip()
+    checkpoint = str(args.get("commit", "")).strip()
     validity, _, uid = checkpoint.partition(":")
     if not validity or not uid.isdigit():
-        raise ToolError("checkpoint should look like '<uidvalidity>:<uid>', "
+        raise ToolError("commit should look like '<uidvalidity>:<uid>', "
                         "exactly as poll_folder reported it.")
     state = _read_state()
     cursor = (state.get("cursors") or {}).get(folder) or {}
@@ -3529,14 +3533,14 @@ def tool_ack_mailbox(args):
         raise ToolError(
             "poll_folder has not reported uid %s for '%s', so that checkpoint "
             "was not issued by it. Nothing was changed. Call poll_folder with "
-            "advance=false and ack the checkpoint it reports." % (uid, folder))
+            "advance=false and commit the checkpoint it reports." % (uid, folder))
     cursor = dict(cursor, uidvalidity=validity, last_uid=int(uid))
     state.setdefault("cursors", {})[folder] = cursor
     _write_state(state)
     return "Cursor for '%s' committed at uid %s." % (folder, uid)
 
 
-def tool_folder_status(args):
+def _folder_status(args):
     """Counts plus the UIDVALIDITY that every uid in this folder depends on."""
     folder = args.get("folder", "INBOX")
     conn = imap_connect()
@@ -3794,50 +3798,35 @@ TOOLS = [
         "name": "list_folders",
         "description": "List all Proton folders and labels available over the "
                        "Bridge. Call this first to learn exact folder/label "
-                       "names for filing and tagging.",
-        "inputSchema": {"type": "object", "properties": {}},
-        "handler": tool_list_folders,
-    },
-    {
-        "name": "folder_status",
-        "description": "Message counts plus UIDNEXT and UIDVALIDITY for a folder. "
-                       "UIDs are only valid within one UIDVALIDITY generation, so "
-                       "check this before acting on uids noted earlier.",
+                       "names for filing and tagging. Pass folder to get that "
+                       "folder's message counts plus UIDNEXT and UIDVALIDITY "
+                       "instead: UIDs are only valid within one UIDVALIDITY "
+                       "generation, so check it before acting on uids noted "
+                       "earlier.",
         "inputSchema": {
             "type": "object",
-            "properties": {"folder": {"type": "string", "description": "Default INBOX."}},
+            "properties": {"folder": {"type": "string", "description": "Report this one folder's counts and UIDVALIDITY instead of listing every folder."}},
         },
-        "handler": tool_folder_status,
+        "handler": tool_list_folders,
     },
     {
         "name": "poll_folder",
         "description": "Messages that have arrived since the last poll. The very "
                        "first poll emits nothing and just records where the "
                        "mailbox ends, so turning this on does not replay the "
-                       "backlog. Marks nothing as read.",
+                       "backlog. Marks nothing as read. Pass commit to commit "
+                       "a checkpoint an advance=false poll returned; repeating "
+                       "that is harmless.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "limit": {"type": "integer", "description": "Most per call, 1 to 100 (default 20)."},
-                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with ack_folder."},
+                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with commit."},
+                "commit": {"type": "string", "description": "A checkpoint '<uidvalidity>:<uid>', exactly as an advance=false poll reported it. Commits it instead of polling."},
             },
         },
         "handler": tool_poll_mailbox,
-    },
-    {
-        "name": "ack_folder",
-        "description": "Commit a checkpoint returned by poll_folder with "
-                       "advance=false. Repeating it is harmless.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folder": {"type": "string", "description": "Default INBOX."},
-                "checkpoint": {"type": "string", "description": "Exactly as poll_folder reported it."},
-            },
-            "required": ["checkpoint"],
-        },
-        "handler": tool_ack_mailbox,
     },
     {
         "name": "search_mail",
@@ -4287,9 +4276,10 @@ _MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
 # mailbox, so it falls outside _MUTATING while plainly changing something, and
 # a mode called readonly cannot be the one that offers it.
 #
-# The polling pair stay. poll_folder and ack_folder write this server's own
-# checkpoint and nothing of yours, so removing them would cost the one workflow
-# readonly is for, watching a mailbox, to protect a file that is ours anyway.
+# poll_folder stays. It writes this server's own checkpoint, when it polls and
+# when it commits, and nothing of yours, so removing it would cost the one
+# workflow readonly is for, watching a mailbox, to protect a file that is ours
+# anyway.
 # That distinction is the whole reason this set is separate from _MUTATING.
 _READONLY_ALSO_REMOVES = {"purge_attachments"}
 if MODE == "readonly":
@@ -4304,12 +4294,12 @@ elif MODE == "organise":
 # ----------------------------------------------------------------------------
 # Not derived from _MUTATING, on purpose. That set is about mail: which tools
 # change the mailbox, and so which ones a mode should take away. readOnlyHint
-# asks a wider question, whether a tool changes anything at all, and three
-# tools fall the other side of that line. purge_attachments deletes files off
-# the disk and never touches the mailbox. poll_folder and ack_folder both write
-# the local checkpoint. Reusing _MUTATING here would have declared all three
-# read-only, which is the kind of wrong a reviewer takes at face value.
-_READ_ONLY = {"list_folders", "folder_status", "search_mail",
+# asks a wider question, whether a tool changes anything at all, and two tools
+# fall the other side of that line. purge_attachments deletes files off the
+# disk and never touches the mailbox. poll_folder writes the local checkpoint.
+# Reusing _MUTATING here would have declared both read-only, which is the kind
+# of wrong a reviewer takes at face value.
+_READ_ONLY = {"list_folders", "search_mail",
               "get_headers", "read_message", "list_attachments",
               "read_attachment", "find_thread"}
 
@@ -4319,7 +4309,7 @@ _DESTRUCTIVE = {"send", "forward", "reply", "send_draft",
                 "purge_attachments"}
 
 # Running it twice lands in the same place as running it once.
-_IDEMPOTENT = {"ack_folder", "mark", "apply_label", "remove_label",
+_IDEMPOTENT = {"mark", "apply_label", "remove_label",
                "move_to_folder", "create_folder_or_label", "delete_label",
                "delete_draft", "update_draft", "save_attachment",
                "purge_attachments"}
@@ -4329,9 +4319,7 @@ _LOCAL_ONLY = {"purge_attachments"}
 
 TITLES = {
     "list_folders": "List folders and labels",
-    "folder_status": "Folder status",
     "poll_folder": "Poll for new mail",
-    "ack_folder": "Acknowledge poll checkpoint",
     "search_mail": "Search a folder",
     "get_headers": "Get message headers",
     "read_message": "Read a message",
