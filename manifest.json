@@ -124,11 +124,11 @@
     },
     {
       "name": "mark",
-      "description": "Mark one message (uid) or many in one pass (uids) read/unread or star/unstar. More than one needs confirmed=true; preview with dry_run=true first."
+      "description": "Mark one message (uid) or many in one pass (uids) read/unread or star/unstar."
     },
     {
       "name": "apply_label",
-      "description": "Tag one message (uid) or many (uids) with an existing label. Messages stay where they are. More than one needs confirmed=true."
+      "description": "Tag one message (uid) or many (uids) with an existing label. Messages stay where they are."
     },
     {
       "name": "remove_label",

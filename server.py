@@ -4188,8 +4188,7 @@ TOOLS = [
     {
         "name": "mark",
         "description": "Mark one message (uid) or many in one pass (uids) "
-                       "read/unread or star/unstar. More than one needs "
-                       "confirmed=true; preview with dry_run=true first.",
+                       "read/unread or star/unstar.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4199,7 +4198,6 @@ TOOLS = [
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
-                "confirmed": {"type": "boolean", "description": "Required to change more than one message."},
             },
             "required": ["action"],
         },
@@ -4208,8 +4206,7 @@ TOOLS = [
     {
         "name": "apply_label",
         "description": "Tag one message (uid) or many (uids) with an existing "
-                       "label. Messages stay where they are. More than one "
-                       "needs confirmed=true.",
+                       "label. Messages stay where they are.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -4219,7 +4216,6 @@ TOOLS = [
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
-                "confirmed": {"type": "boolean", "description": "Required to change more than one message."},
             },
             "required": ["label"],
         },

@@ -5829,6 +5829,15 @@ class MergedBulkEntryPoints(unittest.TestCase):
                                  ["101", "102"])
                 self.assertIn("2 of 2", out)
 
+    def test_mark_and_apply_label_schemas_claim_no_gate(self):
+        # The schema is what a model reads: it must not ask for a
+        # confirmation the code never checks.
+        for name in ("mark", "apply_label"):
+            with self.subTest(tool=name):
+                tool = next(t for t in server.TOOLS if t["name"] == name)
+                self.assertNotIn("confirmed", tool["description"])
+                self.assertNotIn("confirmed", tool["inputSchema"]["properties"])
+
     def test_more_than_one_uid_with_confirmed_acts_on_each(self):
         expect = {"tool_mark": "STORE", "tool_apply_label": "COPY",
                   "tool_move_to_folder": "MOVE"}
