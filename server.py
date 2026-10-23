@@ -2060,15 +2060,6 @@ def _one_or_many(args, single, plural):
     return many
 
 
-def _gate_many(args, n, verb):
-    """Acting on more than one message needs confirmed=true, as every other
-    batch change here does. A preview needs none."""
-    if n > 1 and not args.get("dry_run") and not args.get("confirmed"):
-        raise ToolError("Refusing to %s %d messages without confirmed=true. "
-                        "Show the user the uids, or call with dry_run=true "
-                        "first, then confirm." % (verb, n))
-
-
 _MARK_FLAGS = {
     "read": ("+FLAGS", r"(\Seen)"),
     "unread": ("-FLAGS", r"(\Seen)"),
@@ -3355,7 +3346,6 @@ def _mark_many(args):
     if action not in _MARK_FLAGS:
         raise ToolError("action must be one of: read, unread, star, unstar")
     op, flag = _MARK_FLAGS[action]
-    _gate_many(args, len(_parse_uids(args)), "mark")
 
     def one(conn, uid):
         typ, resp = conn.uid("STORE", uid, op, flag)
@@ -3366,7 +3356,6 @@ def _mark_many(args):
 
 def _apply_label_many(args):
     label = args["label"]
-    _gate_many(args, len(_parse_uids(args)), "label")
     resolved = {}
 
     def check(conn):

@@ -5762,9 +5762,10 @@ class BulkPreviewChecks(unittest.TestCase):
 
 class MergedBulkEntryPoints(unittest.TestCase):
     """mark, apply_label, remove_label, move_to_folder and delete_label each
-    took over a bulk tool. One target keeps the single tool's gate, more than
-    one needs confirmed=true, and the plural form keeps every gate the old
-    bulk tool had."""
+    took over a bulk tool. One target keeps the single tool's gate, and the
+    plural form keeps exactly the gate the old bulk tool had: moving, removing
+    a label and deleting labels need confirmed=true, marking and labelling
+    never did."""
 
     MUTATING = BulkPreviewChecks.MUTATING
 
@@ -5796,6 +5797,8 @@ class MergedBulkEntryPoints(unittest.TestCase):
 
     def test_more_than_one_uid_without_confirmed_is_refused(self):
         for fn, extra in self.CASES:
+            if fn in (server.tool_mark, server.tool_apply_label):
+                continue  # never gated, as bulk_mark and bulk_apply_label were not
             for uids in (["101", "102"], "101,102", "101 102"):
                 with self.subTest(tool=fn.__name__, uids=uids):
                     self.fake.log = []
@@ -5813,6 +5816,18 @@ class MergedBulkEntryPoints(unittest.TestCase):
                 with self.assertRaises(server.ToolError) as cm:
                     server.tool_delete_label({"labels": labels})
                 self.assertIn("confirmed", str(cm.exception))
+
+    def test_marking_and_labelling_many_need_no_confirmation(self):
+        # bulk_mark and bulk_apply_label were never gated: both are trivially
+        # undone, and the README says so.
+        for fn, extra, cmd in ((server.tool_mark, {"action": "read"}, "STORE"),
+                               (server.tool_apply_label, {"label": "Keep"}, "COPY")):
+            with self.subTest(tool=fn.__name__):
+                self.fake.log = []
+                out = fn(dict(extra, uids=["101", "102"]))
+                self.assertEqual([c[1] for c in self.fake.log if c[0] == cmd],
+                                 ["101", "102"])
+                self.assertIn("2 of 2", out)
 
     def test_more_than_one_uid_with_confirmed_acts_on_each(self):
         expect = {"tool_mark": "STORE", "tool_apply_label": "COPY",
@@ -5958,12 +5973,12 @@ class MergedBulkEntryPoints(unittest.TestCase):
         self.assertEqual(self._changes(), [])
 
     def test_a_refused_batch_is_audited(self):
-        res = self._call("apply_label", {"uids": ["101", "102"],
-                                         "label": "Keep"})
+        res = self._call("move_to_folder", {"uids": ["101", "102"],
+                                            "to_folder": "Trash"})
         self.assertTrue(res.get("isError"))
         rec = self._audit()[-1]
         self.assertEqual((rec["tool"], rec["outcome"]),
-                         ("apply_label", "refused"))
+                         ("move_to_folder", "refused"))
 
     def test_merged_tools_keep_the_stricter_hints(self):
         # Each pair had the same hints, so the merged tool keeps them. Written
