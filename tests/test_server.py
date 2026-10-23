@@ -112,8 +112,8 @@ class AttachmentPicking(unittest.TestCase):
 
 class ReadAttachmentImages(unittest.TestCase):
     """view_attachment became part of read_attachment. An image comes back as
-    an image block under view_attachment's size limit, an inline part needs
-    include_inline=true (view_attachment always included them), and text
+    an image block under view_attachment's size limit, a named inline part is
+    found as view_attachment found it, and text
     comes back as text, as before."""
 
     def setUp(self):
@@ -174,12 +174,25 @@ class ReadAttachmentImages(unittest.TestCase):
         self.assertEqual(out[1]["mimeType"], ctype)
         self.assertEqual(base64.b64decode(out[1]["data"]), payload)
 
-    def test_an_inline_image_needs_include_inline(self):
-        with self.assertRaises(server.ToolError):
-            server.tool_read_attachment({"uid": "1", "filename": "logo.png"})
-        out = server.tool_read_attachment({"uid": "1", "filename": "logo.png",
-                                           "include_inline": True})
-        self._image(out, "logo.png", "image/png", b"\x89PNG fake")
+    def test_a_named_inline_image_needs_no_include_inline(self):
+        # view_attachment always looked at inline parts, so naming a pasted
+        # screenshot found it. Naming one here does too.
+        for extra in ({}, {"include_inline": True}):
+            with self.subTest(**extra):
+                out = server.tool_read_attachment(
+                    dict(extra, uid="1", filename="logo.png"))
+                self._image(out, "logo.png", "image/png", b"\x89PNG fake")
+
+    def test_a_name_matching_a_document_still_picks_the_document(self):
+        out = server.tool_read_attachment({"uid": "1", "filename": "notes"})
+        self.assertIsInstance(out, str)
+        self.assertIn("notes@evil.example", out)
+
+    def test_a_name_matching_nothing_lists_every_part(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_read_attachment({"uid": "1", "filename": "nope"})
+        self.assertIn("No attachment matching 'nope'", str(cm.exception))
+        self.assertIn("logo.png", str(cm.exception))
 
     def test_an_attached_image_comes_back_as_an_image(self):
         for extra in ({}, {"include_inline": True}):

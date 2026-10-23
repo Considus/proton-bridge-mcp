@@ -3006,17 +3006,16 @@ def tool_read_attachment(args):
         att = _pick_attachment(raw, want, include_inline=True)
     else:
         items = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
-        if not items:
-            raise ToolError("No document attachments on uid %s in '%s'. Pass "
-                            "include_inline=true to include inline images."
-                            % (uid, folder))
+        if not items and not want:
+            raise ToolError("No document attachments on uid %s in '%s'. Name "
+                            "one via 'filename', or pass include_inline=true "
+                            "to include inline images." % (uid, folder))
         if want:
             match = [a for a in items if a["filename"].lower() == want.lower()] or \
                     [a for a in items if want.lower() in a["filename"].lower()]
-            if not match:
-                raise ToolError("No attachment matching '%s'. Present: %s"
-                                % (want, ", ".join(a["filename"] for a in items)))
-            att = match[0]
+            # A name no document has may be an inline image, which
+            # view_attachment always searched.
+            att = match[0] if match else _pick_attachment(raw, want, include_inline=True)
         elif len(items) == 1:
             att = items[0]
         else:
@@ -4004,7 +4003,7 @@ TOOLS = [
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "filename": {"type": "string", "description": "Which attachment (partial match OK). Optional if there is only one."},
-                "include_inline": {"type": "boolean", "description": "Also consider inline images and PGP keys, which are hidden by default."},
+                "include_inline": {"type": "boolean", "description": "Also consider inline images and PGP keys, which are hidden by default. A filename no document matches is looked for among them anyway."},
             },
             "required": ["uid"],
         },
