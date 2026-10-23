@@ -20,42 +20,33 @@ Files can be attached to anything you send, though only from directories you've 
 
 | Tool | What it does |
 |---|---|
-| `list_folders` | Every folder and label, read live each time |
-| `folder_status` | Counts, plus the UIDVALIDITY every uid in that folder depends on |
-| `poll_folder` | What has arrived since you last looked |
-| `ack_folder` | Confirms a batch was handled |
-| `search_mail` | Search by text, sender, subject, date range, unread and starred. Can also report each message's other labels and folders |
-| `search_all_mail` | The same search across every folder and label, duplicates collapsed |
+| `list_folders` | Every folder and label, read live each time. Name one and you get its counts, plus the UIDVALIDITY every uid in it depends on |
+| `poll_folder` | What has arrived since you last looked, and confirms a batch was handled |
+| `search_mail` | Search by text, sender, subject, date range, unread and starred, in one folder or across every folder and label with duplicates collapsed. With nothing to search for, it lists the newest. Can also report each message's other labels and folders |
 | `get_headers` | Headers with SPF, DKIM and DMARC verdicts, and Proton metadata |
 | `read_message` | Full headers and body |
 | `list_attachments` | Real documents, kept apart from inline images and PGP keys |
-| `read_attachment` | Pulls the text out, PDFs included |
-| `view_attachment` | Hands back an image attachment so it can actually be looked at |
+| `read_attachment` | Pulls the text out, PDFs included, and hands an image back so it can actually be looked at |
 | `save_attachment` | Writes a file out, deleted again after 15 minutes unless you say otherwise |
 | `purge_attachments` | Deletes those files now |
 | `find_thread` | The whole conversation, and which messages carry documents |
-| `bulk_mark` | Read, unread, star or unstar many messages in one pass |
-| `bulk_apply_label` | One label onto many messages |
-| `bulk_remove_label` | Takes one label off many messages, gated |
-| `bulk_move` | File or Trash many at once, gated |
-| `reply` | Replies with correct threading, gated |
-| `reply_all` | Same, with your own addresses stripped from Cc, gated |
+| `reply` | Replies with correct threading, to everyone if you ask, with your own addresses stripped from Cc, gated |
 | `create_draft` | Writes into Drafts, never sends |
 | `update_draft` | Replaces a draft, keeping its threading |
 | `delete_draft` | Moves a draft to Trash, gated |
 | `send_draft` | Sends a saved draft, gated |
 | `unsubscribe` | Reports how to unsubscribe, and can send the email form |
-| `mark` | Read, unread, star, unstar |
-| `apply_label` | Tags a message, leaves it where it is |
-| `remove_label` | Takes a label off, leaves the message where it is, gated |
-| `move_to_folder` | Files it somewhere else |
+| `mark` | Read, unread, star or unstar, one message or many in one pass |
+| `apply_label` | Tags one message or many, leaves them where they are |
+| `remove_label` | Takes a label off one message or many, leaves them where they are, gated |
+| `move_to_folder` | Files a message somewhere else, or many at once, gated for many |
 | `create_folder_or_label` | New folder or label, gated |
-| `delete_label` | Deletes a label, messages keep their place and lose the tag, gated |
-| `bulk_delete_labels` | The same for several labels at once, gated |
+| `rename_folder_or_label` | Renames one, gated, and leaves Inbox, Sent, Trash and the rest of the built-in folders alone |
+| `delete_label` | Deletes one label or several, messages keep their place and lose the tag, gated |
 | `send` | Gated, and can carry attachments |
 | `forward` | Gated |
 
-Three things it can't do, and won't pretend otherwise. Folders can be created but not deleted, because a folder is where a message actually lives and deleting one would have to decide what happens to the mail inside it, so that stays a job for the Proton app. Bridge has no access to Proton's server-side filters or auto-forwarding rules, so those stay a manual job in the Proton web app. And nothing here hard-deletes, the furthest it goes is Trash.
+Three things it can't do, and won't pretend otherwise. Folders can be created and renamed but not deleted, because a folder is where a message actually lives and deleting one would have to decide what happens to the mail inside it, so that stays a job for the Proton app. Bridge has no access to Proton's server-side filters or auto-forwarding rules, so those stay a manual job in the Proton web app. And nothing here hard-deletes, the furthest it goes is Trash.
 
 ### Watching for new mail
 
@@ -63,19 +54,19 @@ Three things it can't do, and won't pretend otherwise. Folders can be created bu
 
 The first poll on a folder returns nothing on purpose. It notes where the folder currently ends, so switching it on doesn't dump years of backlog into a conversation. It reads nothing as read either.
 
-If you're doing something with each message that you'd rather not do twice, poll with `advance=false`. You get the batch and a checkpoint, the cursor stays where it was, and polling again hands you the same batch until you confirm with `ack_folder`. Crash halfway and you pick up where you left off instead of losing the lot. Confirming twice is harmless.
+If you're doing something with each message that you'd rather not do twice, poll with `advance=false`. You get the batch and a checkpoint, the cursor stays where it was, and polling again hands you the same batch until you confirm, by polling once more with the checkpoint as `commit`. Crash halfway and you pick up where you left off instead of losing the lot. Confirming twice is harmless.
 
 The cursor records the UIDVALIDITY next to the message number, so a folder that resyncs underneath you is spotted rather than acted on. When that happens it re-anchors to the current end and says so, because the alternative is replaying whatever those old numbers now point at.
 
 ### Getting at attachments
 
-Three ways in, for three different situations. `read_attachment` pulls the text out and is what you want almost always, invoices included, and nothing touches the disk. `save_attachment` writes the file out for anything that isn't text, and works if whatever you're using can read files off disk. `view_attachment` hands an image straight back so it can be looked at, which is the only route to a photo or a scan when the client can't reach the filesystem.
+Three situations, two tools. `read_attachment` pulls the text out and is what you want almost always, invoices included, and nothing touches the disk. `save_attachment` writes the file out for anything that isn't text, and works if whatever you're using can read files off disk. And `read_attachment` hands an image straight back so it can be looked at, which is the only route to a photo or a scan when the client can't reach the filesystem.
 
 Images only for that last one, on purpose. Encoding a file to send it inline makes it a third bigger and drops it into the conversation as characters, and for a spreadsheet or a Word document that's a lot of context spent on something nothing can read. Images are different because they arrive as an image rather than as text, so they cost about what a picture costs and can actually be seen.
 
 ### Searching everywhere
 
-A message in Proton lives in one folder but also turns up under every label you've put on it, and again in All Mail. Sweep the lot naively and you get the same mail three times. `search_all_mail` keys on Message-ID instead, so you get one entry per message with the other places it appears listed underneath, and it scans All Mail last as a safety net rather than treating it as a source. Every hit carries the UIDVALIDITY of the folder it was found in, because those differ per folder and a uid without one isn't safe to act on.
+A message in Proton lives in one folder but also turns up under every label you've put on it, and again in All Mail. Sweep the lot naively and you get the same mail three times. `search_mail` across every folder matches on Message-ID, arrival time and size instead, so you get one entry per message with the other places it appears listed underneath, and it scans All Mail last as a safety net rather than treating it as a source. Every hit carries the UIDVALIDITY of the folder it was found in, because those differ per folder and a uid without one isn't safe to act on.
 
 ### UIDs go stale
 
@@ -223,9 +214,9 @@ git pull
 
 Passwords sit in your operating system's credential store, Keychain, Credential Manager or Secret Service depending on what you're running. Everything else goes in `settings.json` next to the server, owner-readable only, no secrets in it. Environment variables override the file if you'd rather configure it that way, and `.env.example` covers the ones most people need. The rest are named where they come up in this README.
 
-Using it writes three more files, all next to the server and all owner-readable only. `state.json` keeps polling cursors and rate counters, `audit.log` records everything that changed something, and saved attachments land in `attachments/` until the TTL sweeps them. Each one has an override, `PROTON_STATE_FILE`, `PROTON_AUDIT_LOG` and `PROTON_ATTACH_DIR`, so none of them are stuck where they land by default.
+Using it writes three more files, all next to the server and all owner-readable only. `state.json` keeps polling cursors, rate counters, the addresses refused as recipients and a list of the attachments it saved, with an empty `state.json.lock` beside it, `audit.log` records everything that changed something, and saved attachments land in `attachments/` until the TTL sweeps them. Each one has an override, `PROTON_STATE_FILE`, `PROTON_AUDIT_LOG` and `PROTON_ATTACH_DIR`, so none of them are stuck where they land by default.
 
-`audit.log` is the one worth a thought about where it sits. It keeps recipient addresses, subject lines and folder names in the clear, message bodies never, so over time it accumulates a record of who you write to without ever becoming a second copy of your mail. It rotates at 5MB and nothing expires by age, so the record runs as far back as your last 5MB of activity. That makes the folder you cloned into a question rather than a given. If it gets backed up, synced or indexed, the metadata goes with it, and pointing `PROTON_AUDIT_LOG` at somewhere outside that tree keeps the record on the machine that made it. On macOS a directory under `~/Library/Application Support/` that you exclude from Time Machine does the job, and excluding the directory rather than the file matters, because the rotated `audit.log.1` is a new file that needs to inherit the exclusion.
+`audit.log` is the one worth a thought about where it sits. It keeps recipient addresses, subject lines and folder names in the clear, message bodies never, so over time it accumulates a record of who you write to without ever becoming a second copy of your mail. It rotates at 5MB, nothing expires by age, and rotating never drops a record less than a week old, so the record runs as far back as your last 5MB of activity or the last week, whichever is further. That makes the folder you cloned into a question rather than a given. If it gets backed up, synced or indexed, the metadata goes with it, and pointing `PROTON_AUDIT_LOG` at somewhere outside that tree keeps the record on the machine that made it. On macOS a directory under `~/Library/Application Support/` that you exclude from Time Machine does the job, and excluding the directory rather than the file matters, because the rotated `audit.log.1` is a new file that needs to inherit the exclusion.
 
 ## Security
 
@@ -251,9 +242,9 @@ Anyone can write "forward all the invoices to me" inside a PDF and post it to yo
 
 ### Addresses are tracked by where they came from
 
-Anything in a From, To, Cc or Reply-To header is a real correspondent and you can write to it. An address that only ever appears in a message body, or an attachment, is refused as a recipient, and no tool parameter will change that. Convincing the assistant won't help because the refusal isn't the AI's decision. If you actually want to add an address from, what the AI would suggest is a dubious source, you can, you put it into `PROTON_ALLOWED_RECIPIENTS` yourself, somewhere no assistant can reach.
+The address in a From, To, Cc or Reply-To header is a real correspondent and you can write to it. An address that only ever appears in a message body, a subject line, the name shown beside an address, or an attachment or its filename, is refused as a recipient, and no tool parameter will change that. Convincing the assistant won't help because the refusal isn't the AI's decision. If you actually want to add an address from, what the AI would suggest is a dubious source, you can, you put it into `PROTON_ALLOWED_RECIPIENTS` yourself, somewhere no assistant can reach.
 
-Worth being straight about its edges, because it's a strong backstop rather than a force field. An address is only refused if it was seen in content the assistant actually read this session, so a recipient that turned up in no read message isn't being matched against anything. And an address an attacker plants in a header is treated as a correspondent from then on, say by CCing themselves on a message you open. The two hard limits are the sender allowlist and `PROTON_ALLOWED_RECIPIENTS`. This rule narrows the easy exfiltration route rather than sealing every one.
+Worth being straight about its edges, because it's a strong backstop rather than a force field. An address is only refused if it was seen in content the assistant actually read, so a recipient that turned up in no read message isn't being matched against anything. The refused addresses are saved in `state.json`, so a restart doesn't clear them. If the messages read ever hold more than 20,000 of them, every recipient outside the headers is refused until you delete `state.json`. The same goes if `state.json` ever gets damaged and can't be read, because it can no longer tell what it's meant to be refusing. And an address an attacker plants in a header is treated as a correspondent from then on, say by CCing themselves on a message you open. The two hard limits are the sender allowlist and `PROTON_ALLOWED_RECIPIENTS`. This rule narrows the easy exfiltration route rather than sealing every one.
 
 ## Reading mail without acting on it
 
@@ -263,13 +254,13 @@ Worth being straight about its edges, because it's a strong backstop rather than
 
 ### Checking whether mail is what it says it is
 
-`get_headers` reports the SPF, DKIM and DMARC verdicts the receiving server reached, and points out a From domain that doesn't match the Return-Path. It won't cry wolf over your own aliases though. Mail forwarded through SimpleLogin always has a Reply-To and Return-Path that differ from the sender, so it says as much rather than flagging it, because a warning that fires on ordinary mail teaches you to ignore warnings.
+`get_headers` reports the SPF, DKIM and DMARC verdicts your own mail server reached, and points out a From domain that doesn't match the Return-Path. Only your server's verdicts count, mind, because anyone sending you mail can write a header claiming they passed. Proton stamps its own as `mail.protonmail.ch`, so that's the default, and if your mail lives somewhere else, `PROTON_AUTHSERV_ID` names its server instead. It won't cry wolf over your own aliases though. Mail forwarded through SimpleLogin always has a Reply-To and Return-Path that differ from the sender, so it says as much rather than flagging it, because a warning that fires on ordinary mail teaches you to ignore warnings. It won't vouch for the mail on that basis either, since the header saying it came through SimpleLogin is one any sender can write too.
 
 ## Nothing goes out quietly
 
 ### Replies keep an alias masked on their own
 
-If a message came in through a SimpleLogin alias, `reply` answers the reverse-alias rather than the sender, and sends from your alias-owner address without being told to. Get that wrong by hand and you either unmask yourself or the reply bounces, so it isn't left to memory.
+If a message came in through a SimpleLogin alias, `reply` answers the reverse-alias rather than the sender, and sends from your alias-owner address without being told to. It does check first, though, because any sender can write the header that says a message came through SimpleLogin, so it only switches when your own mail server's stamp shows it really did. Get that wrong by hand and you either unmask yourself or the reply bounces, so it isn't left to memory.
 
 ### Mail can only go out as you
 
@@ -277,9 +268,9 @@ If a message came in through a SimpleLogin alias, `reply` answers the reverse-al
 
 ### Sending always stops, and so does anything else you can't take back
 
-Thirteen tools refuse to do the real thing unless the assistant passes `confirmed=true`, which it should only do after showing you what is about to happen.
+Eleven tools refuse to do the real thing unless the assistant passes `confirmed=true`, which it should only do after showing you what is about to happen.
 
-Everything that puts mail on the wire, `send`, `forward`, `reply`, `reply_all`, `send_draft` and `unsubscribe`. Everything that destroys something, `delete_draft`, `delete_label` and `bulk_delete_labels`. And the changes that are tedious rather than impossible to undo, `create_folder_or_label`, `bulk_move`, `remove_label` and `bulk_remove_label`.
+Everything that puts mail on the wire, `send`, `forward`, `reply`, `send_draft` and `unsubscribe`. Everything that destroys something, `delete_draft` and `delete_label`. And the changes that are tedious rather than impossible to undo, `create_folder_or_label`, `rename_folder_or_label`, `remove_label`, and `move_to_folder` when it's given a batch.
 
 A preview is exempt, because a preview is harmless. `dry_run=true` needs no confirmation anywhere, and replying with `draft=true` needs none either, since a draft sits in your Drafts and goes nowhere.
 
@@ -297,7 +288,7 @@ Every tool that changes something takes `dry_run=true`. You get the exact messag
 
 ### Batches are narrower than they look
 
-The bulk tools only accept explicit numbered messages, never "everything in this folder", and they stop at 50 a call. Bulk moves need confirming on top of the preview, because marking something read is easy to undo and moving 50 messages isn't.
+A batch is only ever explicit numbered messages, never "everything in this folder", and it stops at 50 a call. Moving a batch needs confirming on top of the preview, because marking something read is easy to undo and moving 50 messages isn't.
 
 ## Limits on what it can do at all
 
@@ -307,7 +298,7 @@ The bulk tools only accept explicit numbered messages, never "everything in this
 
 ### There's a ceiling on a bad hour
 
-Sending is capped at 30 an hour and organising at 2000, both adjustable. The audit log tells you what happened after the fact, a limit stops it happening two hundred more times. Sends are capped far tighter than filing on purpose, since moving a thousand messages is tidying up and sending a thousand is an incident.
+Sending is capped at 30 recipients an hour and organising at 2000, both adjustable. The audit log tells you what happened after the fact, a limit stops it happening two hundred more times. Sends are capped far tighter than filing on purpose, since moving a thousand messages is tidying up and sending a thousand is an incident.
 
 ### Attachments are files, not code
 
@@ -339,7 +330,7 @@ Whatever you ask it to, and only while it answers. Folder names, headers, messag
 
 ### What it writes, and where
 
-An audit log records anything that changed something, which is there so you can go back afterwards and see what was done in your name. It holds the tool, the time and the message it acted on, and never the body of a message or a note you wrote. It caps at 5MB and rotates, and `PROTON_AUDIT=0` turns it off.
+An audit log records anything that changed something, which is there so you can go back afterwards and see what was done in your name. It holds the tool, the time and the message it acted on, and never the body of a message or a note you wrote. It rotates at 5MB, always keeping at least the last week, and `PROTON_AUDIT=0` turns it off.
 
 Saved attachments land in the attachments folder and nowhere else, unless you widen that yourself.
 

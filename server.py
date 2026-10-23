@@ -38,7 +38,9 @@ Configuration (environment variables):
 """
 
 import base64
+import contextlib
 import email
+import email.policy
 import email.utils
 import imaplib
 import json
@@ -53,6 +55,11 @@ import sys
 import urllib.parse
 from email.message import EmailMessage
 from email.header import decode_header, make_header
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
 
 # ----------------------------------------------------------------------------
 # Config
@@ -128,7 +135,7 @@ ATTACH_DIR = _cfg("PROTON_ATTACH_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "attachments")
 
 SERVER_NAME = "proton-mail"
-SERVER_VERSION = "1.2.2"
+SERVER_VERSION = "2.0.0"
 DEFAULT_PROTOCOL = "2025-06-18"
 
 
@@ -223,12 +230,21 @@ def _sender_domain(address):
 # without becoming a second copy of the mailbox.
 # ----------------------------------------------------------------------------
 _AUDIT_REDACT = ("body", "note")
+# Rotating replaces audit.log.1, so it waits until the newest record there is
+# this old. Otherwise a burst of calls could push out a send made minutes ago.
+_AUDIT_KEEP_S = 7 * 24 * 3600
 
 
 def _rotate_audit():
     try:
-        if os.path.getsize(AUDIT_LOG) > AUDIT_MAX_BYTES:
-            os.replace(AUDIT_LOG, AUDIT_LOG + ".1")
+        if os.path.getsize(AUDIT_LOG) <= AUDIT_MAX_BYTES:
+            return
+        try:
+            if time.time() - os.path.getmtime(AUDIT_LOG + ".1") < _AUDIT_KEEP_S:
+                return
+        except OSError:
+            pass  # no older generation yet
+        os.replace(AUDIT_LOG, AUDIT_LOG + ".1")
     except OSError:
         pass
 
@@ -282,18 +298,72 @@ def _audit(tool, args, outcome, detail=""):
 
 
 # ----------------------------------------------------------------------------
-# Persistent state, shared by the rate limiter and the polling cursors
+# Persistent state, shared by the rate limiter, the polling cursors and the
+# addresses refused as recipients
 # ----------------------------------------------------------------------------
-def _read_state():
+@contextlib.contextmanager
+def _state_lock():
+    """Held across every write of STATE_FILE, so two server processes cannot
+    overwrite each other's saved recipient refusals."""
+    fd = os.open(STATE_FILE + ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(fd, "r+") as f:
+        if fcntl:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        else:
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            else:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _load_state():
+    """-> the saved state, {} when there is none yet, or None when STATE_FILE
+    exists but cannot be read. An unreadable file may hold saved recipient
+    refusals, so it is left for the owner and never overwritten."""
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:
+    except FileNotFoundError:
         return {}
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_state():
+    return _load_state() or {}
 
 
 def _write_state(state):
+    """A caller may have read the state before another process saved a
+    refused address. Keep what is on disk now, so no entry is ever lost."""
+    with _state_lock():
+        disk = _load_state()
+        if disk is None:
+            raise ToolError(
+                "%s could not be read, so nothing was saved. It may hold the "
+                "addresses refused as recipients, so it is left as it is. The "
+                "user can fix or delete it (deleting it also resets polling "
+                "cursors and rate counters)." % STATE_FILE)
+        saved = _saved_taint(disk) | _saved_taint(state)
+        if saved:
+            state["tainted"] = sorted(saved)
+        if disk.get("taint_overflow"):
+            state["taint_overflow"] = True
+        _replace_state(state)
+
+
+def _saved_taint(state):
+    return {a for a in state.get("tainted") or [] if isinstance(a, str)}
+
+
+def _replace_state(state):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
@@ -304,19 +374,27 @@ def _write_state(state):
         pass
 
 
-_SEND_TOOLS = {"send", "forward", "reply", "reply_all", "send_draft", "unsubscribe"}
+_SEND_TOOLS = {"send", "forward", "reply", "send_draft", "unsubscribe"}
 
 
-def _rate_check(tool):
+def _rate_check(tool, n=1):
     """A cap on how much damage a bad hour can do. The audit log tells you what
-    happened afterwards; this stops it happening a thousand times first."""
+    happened afterwards; this stops it happening a thousand times first.
+    n is how many units this uses: a send uses one per recipient."""
     bucket = "send" if tool in _SEND_TOOLS else "write"
     limit = RATE_LIMITS.get(bucket, 0)
-    if limit <= 0:
+    if limit <= 0 or n <= 0:
         return
     now = time.time()
     state = _read_state()
     hits = [t for t in state.get("rate", {}).get(bucket, []) if now - t < 3600]
+    if n > 1 and len(hits) + n > limit:
+        raise ToolError(
+            "Rate limit reached for %s operations: each recipient counts as "
+            "one, this message needs %d more, and %d of the %d allowed in the "
+            "last hour are used. Nothing was sent. Raise PROTON_RATE_%s_PER_HOUR "
+            "if this limit is wrong for how you work."
+            % (bucket, n, len(hits), limit, bucket.upper()))
     if len(hits) >= limit:
         oldest = min(hits)
         raise ToolError(
@@ -325,7 +403,7 @@ def _rate_check(tool):
             "PROTON_RATE_%s_PER_HOUR if this limit is wrong for how you work."
             % (bucket, len(hits), limit,
                max(1, int((3600 - (now - oldest)) / 60)), bucket.upper()))
-    hits.append(now)
+    hits.extend([now] * n)
     state.setdefault("rate", {})[bucket] = hits
     _write_state(state)
 
@@ -520,6 +598,13 @@ _LIST_LINE = re.compile(
 
 def _parse_list_line(raw):
     """-> (flags_lower, name) for one LIST line, or None if it doesn't parse."""
+    parsed = _parse_list_entry(raw)
+    return None if parsed is None else (parsed[0], parsed[2])
+
+
+def _parse_list_entry(raw):
+    """-> (flags_lower, delimiter, name) for one LIST line, or None if it
+    doesn't parse. The delimiter is None when the server reports NIL."""
     if not isinstance(raw, (bytes, bytearray, str)):
         # None, or the tuple imaplib yields when a name arrives as a literal.
         # That needs UTF8=ACCEPT, which this server never enables, so it should
@@ -535,7 +620,10 @@ def _parse_list_line(raw):
         name = m.group("aname")
     else:
         name = name.replace('\\"', '"').replace("\\\\", "\\")
-    return m.group("flags").lower(), name
+    delim = m.group("delim")
+    if delim is not None:
+        delim = delim.replace('\\"', '"').replace("\\\\", "\\")
+    return m.group("flags").lower(), delim, name
 
 
 def _list_folders(conn):
@@ -803,6 +891,8 @@ def _selected_uids(conn, mid):
 # Tool handlers
 # ----------------------------------------------------------------------------
 def tool_list_folders(args):
+    if args.get("folder"):
+        return _folder_status(args)
     conn = imap_connect()
     try:
         folders = _list_folders(conn)
@@ -823,6 +913,15 @@ def tool_list_folders(args):
 
 
 def tool_search_mail(args):
+    if args.get("all_folders"):
+        clash = [k for k in ("folder", "uidvalidity", "include_locations")
+                 if args.get(k)]
+        if clash:
+            raise ToolError(
+                "all_folders searches every mailbox, so it takes no %s. Every "
+                "row already names its mailbox, its uidvalidity and the other "
+                "mailboxes it is in." % " or ".join(clash))
+        return _search_all_mail(args)
     folder = args.get("folder", "INBOX")
     limit = int(args.get("limit", 15))
     conn = imap_connect()
@@ -852,6 +951,7 @@ def tool_search_mail(args):
                 flags += "★"
             hmsg = email.message_from_bytes(header_bytes)
             _note_headers(hmsg)
+            _taint_shown_headers(hmsg)
             _sl = _hstr(hmsg.get("X-SimpleLogin-Type") or hmsg.get("X-Simplelogin-Type"))
             if "forward" in _sl.lower():
                 flags += "↩"  # aliased: repliable via reverse-alias in Reply-To
@@ -887,7 +987,7 @@ def _sort_key(env):
         return 0.0
 
 
-def tool_search_all_mail(args):
+def _search_all_mail(args):
     """Search every selectable mailbox and collapse duplicates.
 
     In Proton a message lives in one folder but also appears under each label
@@ -951,7 +1051,8 @@ def tool_search_all_mail(args):
                 except Exception:
                     rank = _sort_key(env)
                 found[key] = {"folder": name, "uid": uid, "validity": validity,
-                              "env": env, "also": [], "seen": {name}, "rank": rank}
+                              "env": env, "also": [], "seen": {name}, "rank": rank,
+                              "msg": email.message_from_bytes(md[0][1])}
     finally:
         try:
             conn.logout()
@@ -963,6 +1064,7 @@ def tool_search_all_mail(args):
     rows = []
     for r in hits[:limit]:
         env = r["env"]
+        _taint_shown_headers(r["msg"])
         # Never truncate this: a caller deciding by label reads a missing
         # mailbox as "not labelled".
         extra = ("\n    also in: %s" % ", ".join(sorted(set(r["also"])))) if r["also"] else ""
@@ -976,15 +1078,105 @@ def tool_search_all_mail(args):
             % (total, scanned, shown, "\n\n".join(rows)))
 
 
-_AUTH_RE = re.compile(r"\b(spf|dkim|dmarc|arc)\s*=\s*(\w+)", re.I)
+# Any sender can write an Authentication-Results header, so get_headers only
+# believes the ones whose authserv-id (the first word) names your own mail
+# server. Proton's inbound servers stamp mail.protonmail.ch; another host
+# sets PROTON_AUTHSERV_ID to its own name.
+def _authserv_ids():
+    return frozenset(s.strip().lower() for s in
+                     _cfg("PROTON_AUTHSERV_ID", "mail.protonmail.ch").split(",")
+                     if s.strip())
 
 
-def _auth_verdicts(msg):
+AUTHSERV_IDS = _authserv_ids()
+_AUTH_RE = re.compile(r"\s*(spf|dkim|dmarc|arc)(?:\s*/\s*\d+)?\s*=\s*([\w-]+)(?=\s|$)",
+                      re.I)
+
+
+def _ar_clauses(value):
+    """Split an Authentication-Results value on ';' as RFC 8601 does: comments
+    (nested too) are dropped and quoted strings are blanked, so text the
+    sender controls inside either can never start a clause."""
+    out, cur, depth, quoted, esc = [], [], 0, False, False
+    for ch in value:
+        if esc:
+            esc = False
+            if not depth:
+                cur.append("_")
+        elif ch == "\\" and (quoted or depth):
+            esc = True
+        elif quoted:
+            if ch == '"':
+                quoted = False
+            cur.append(ch if ch == '"' else "_")
+        elif ch == "(":
+            depth += 1
+        elif depth:
+            if ch == ")":
+                depth -= 1
+        elif ch == ";":
+            out.append("".join(cur))
+            cur = []
+        else:
+            quoted = ch == '"'
+            cur.append(ch)
+    out.append("".join(cur))
+    return out
+
+
+def _auth_verdicts(msg, authserv_ids=None):
+    """First result per method from the Authentication-Results headers whose
+    authserv-id is in authserv_ids, topmost first, reading only the
+    method=result at the start of each clause. None reads every header, which
+    is for parsing alone; get_headers passes AUTHSERV_IDS, and an empty set
+    gives no verdicts."""
     verdicts = {}
-    for line in msg.get_all("Authentication-Results") or []:
-        for mech, result in _AUTH_RE.findall(_hstr(line)):
-            verdicts.setdefault(mech.lower(), result.lower())
+    for value in msg.get_all("Authentication-Results") or []:
+        clauses = _ar_clauses(_hstr(value))
+        head = clauses[0].split()
+        if authserv_ids is not None and (not head or head[0].lower() not in authserv_ids):
+            continue
+        for clause in clauses[1:]:
+            m = _AUTH_RE.match(clause)
+            if m:
+                verdicts.setdefault(m.group(1).lower(), m.group(2).lower())
     return verdicts
+
+
+_ARC_CHAIN_RE = re.compile(r"(?:^|\s)arc\.chain\s*=\s*(\S+)", re.I)
+
+
+def _simplelogin_forward(msg):
+    """True only when your own mail server proves a SimpleLogin forward: every
+    arc verdict in an Authentication-Results header whose authserv-id is in
+    AUTHSERV_IDS is pass with simplelogin.co in its arc.chain, there is at
+    least one, and X-SimpleLogin-Type says forward. The sender can write that
+    header and any other Authentication-Results header, so neither counts
+    alone. Every trusted arc result must agree because Bridge does not keep
+    header order: a forged pass can sit above the server's own arc=none."""
+    sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
+    if "forward" not in sl.lower():
+        return False
+    seen = False
+    for value in msg.get_all("Authentication-Results") or []:
+        clauses = _ar_clauses(_hstr(value))
+        head = clauses[0].split()
+        if not head or head[0].lower() not in AUTHSERV_IDS:
+            continue
+        for clause in clauses[1:]:
+            m = _AUTH_RE.match(clause)
+            if m and m.group(1).lower() == "arc":
+                chain = _ARC_CHAIN_RE.search(clause, m.end())
+                if not (m.group(2).lower() == "pass" and chain is not None
+                        and "simplelogin.co" in chain.group(1).lower().split(":")):
+                    return False
+                seen = True
+    return seen
+
+
+_UNPROVEN_ALIAS = ("marked as SimpleLogin alias mail, but your mail server's "
+                   "Authentication-Results do not show it arrived through "
+                   "SimpleLogin")
 
 
 def _domain_of(value):
@@ -1007,8 +1199,11 @@ def _header_notes(msg, verdicts):
                      "mailing lists and forwarders, worth a look otherwise."
                      % (from_dom, path_dom))
     if aliased:
-        notes.append("Forwarded through a SimpleLogin alias, so a differing "
-                     "Reply-To and Return-Path are expected here, not a red flag.")
+        notes.append("Says it was forwarded through a SimpleLogin alias, so a "
+                     "differing Reply-To and Return-Path (%s) would be expected "
+                     "here, not a red flag. Any sender can write that header, "
+                     "so it holds only if that Return-Path is your alias "
+                     "provider's." % (path_dom or "none"))
     if msg.get("List-Unsubscribe"):
         notes.append("Carries List-Unsubscribe, so it is bulk or marketing mail.")
     return notes
@@ -1035,13 +1230,20 @@ def tool_get_headers(args):
 
     msg = email.message_from_bytes(raw)
     _note_headers(msg)
+    _taint_shown_headers(msg)
     if args.get("raw"):
         return ("Full headers for uid %s in '%s':\n\n%s"
                 % (uid, folder, raw.decode("utf-8", "replace")[:20000]))
 
-    verdicts = _auth_verdicts(msg)
-    auth = "\n".join("  %-6s %s" % (m, verdicts.get(m, "not reported"))
+    verdicts = _auth_verdicts(msg, AUTHSERV_IDS)
+    missing = "not reported" if AUTHSERV_IDS else "not established"
+    auth = "\n".join("  %-6s %s" % (m, verdicts.get(m, missing))
                      for m in ("spf", "dkim", "dmarc", "arc"))
+    if not AUTHSERV_IDS:
+        auth += ("\n  Not checked: PROTON_AUTHSERV_ID is not set. Any sender can "
+                 "write an Authentication-Results header, so only your mail "
+                 "server's counts. Set PROTON_AUTHSERV_ID to the first word of "
+                 "the topmost one on mail you trust (raw=true shows it).")
     notes = _header_notes(msg, verdicts)
     meta = [h for h in msg.keys() if h.lower().startswith(("x-simplelogin", "x-pm-"))]
     return (
@@ -1074,6 +1276,7 @@ def tool_read_message(args):
         body = _extract_body(raw)
         msg = email.message_from_bytes(raw)
         _note_headers(msg)      # header addresses = legitimate correspondents
+        _taint_shown_headers(msg)  # Subject and display names = untrusted
         _taint_text(body)       # body addresses = untrusted, blocked as recipients
         reply_to = _decode(msg.get("Reply-To"))
         reply_line = ("Reply-To: %s\n" % reply_to) if reply_to else ""
@@ -1082,7 +1285,11 @@ def tool_read_message(args):
         # (PROTON_ALIAS_FROM) to keep the alias masked.
         sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
         guidance = ""
-        if "forward" in sl.lower():
+        if "forward" in sl.lower() and not _simplelogin_forward(msg):
+            guidance = ("\n↩ %s%s, and the sender may have written that "
+                        "header. A reply goes from your own address.\n"
+                        % (_UNPROVEN_ALIAS[0].upper(), _UNPROVEN_ALIAS[1:]))
+        elif "forward" in sl.lower():
             addr = email.utils.parseaddr(msg.get("Reply-To") or "")[1]
             if addr:
                 guidance = ("\n↩ SimpleLogin alias mail. To reply with the alias masked, "
@@ -1162,6 +1369,7 @@ def _describe(conn, folder, uid):
                            "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
         if typ == "OK" and md and md[0] is not None:
             env = _parse_envelope(md[0][1])
+            _taint_shown_headers(email.message_from_bytes(md[0][1]))
             return "uid %s  \"%s\"  from %s" % (
                 uid, env["subject"] or "(no subject)", env["from"] or "(unknown)")
     except Exception:
@@ -1169,11 +1377,51 @@ def _describe(conn, folder, uid):
     return "uid %s  (not found in '%s')" % (uid, folder)
 
 
+def _leaf_parts(part):
+    """Every non-multipart part, with an attached message kept whole."""
+    if part.get_content_maintype() == "multipart":
+        for sub in part.iter_parts():
+            for leaf in _leaf_parts(sub):
+                yield leaf
+    else:
+        yield part
+
+
 def _preview(msg, limit=700, files=None):
+    """What would go out, read back from the bytes that would be sent, so a
+    stored draft or a message with attachments shows its body and every part.
+    A message that cannot be read back is refused rather than shown empty."""
     try:
-        body = msg.get_content()
-    except Exception:
+        full = email.message_from_bytes(msg.as_bytes(),
+                                        policy=email.policy.default)
+        text = full.get_body(preferencelist=("plain", "html"))
         body = ""
+        if text is not None:
+            try:
+                body = text.get_content()
+            except Exception:
+                body = (text.get_payload(decode=True) or b"").decode(
+                    "utf-8", "replace")
+            if text.get_content_subtype() == "html":
+                body = _strip_html(body)
+        parts = []
+        paths = [(f["name"], f["path"]) for f in files or []]
+        for part in _leaf_parts(full):
+            if part is text:
+                continue
+            name = part.get_filename()
+            data = part.get_payload(decode=True)
+            if data is None:
+                data = part.as_bytes()
+            src = ""
+            if paths and paths[0][0] == name:
+                src = " from %s" % paths.pop(0)[1]
+            parts.append("%s %s (%s, %d bytes)%s" % (
+                "Attach: " if name else "Part:   ", name or "(unnamed)",
+                part.get_content_type(), len(data), src))
+    except Exception as e:
+        raise ToolError("Could not read this message back to preview it (%s). "
+                        "Nothing was sent." % type(e).__name__)
     if len(body) > limit:
         body = body[:limit] + "\n[... %d more characters ...]" % (len(body) - limit)
     lines = ["From:    %s" % (msg["From"] or ""),
@@ -1181,10 +1429,42 @@ def _preview(msg, limit=700, files=None):
              "Cc:      %s" % (msg["Cc"] or "(none)")]
     lines += ["Bcc:     %s" % v for v in msg.get_all("Bcc", [])]
     lines.append("Subject: %s" % (msg["Subject"] or ""))
-    for att in files or []:
-        lines.append("Attach:  %s (%d bytes) from %s"
-                     % (att["name"], att["size"], att["path"]))
-    return lines + ["", body]
+    return lines + parts + ["", body]
+
+
+def _taint_preview(lines, msg):
+    """A preview that shows stored mail hands its addresses to the model, in
+    the body, the subject and attachment names alike, so mark them as
+    read_message would, except the ones this message is already addressed
+    to and that the checks have passed."""
+    allow = _allowed_recipients()
+    rcpts = [a.lower() for a in _envelope_recipients(msg)]
+    rcpts = [a for a in rcpts if a not in _CORRESPONDENTS and a not in allow]
+    # Skip only the recipient lines _preview writes first; everything from
+    # the Subject line on (subject, parts, body) came from the message.
+    start = next((i for i, l in enumerate(lines) if l.startswith("Subject:")), 0)
+    shown = "\n".join(lines[start:])
+    for addr in _find_addresses(shown):
+        addr = addr.lower()
+        # The message's own recipients passed the checks already, so a match
+        # that is one of them plus only punctuation is not tainted. Anything
+        # with more around it (friend@x.test.evil.example) stays tainted,
+        # even if that then blocks the recipient it embeds.
+        if (addr in _CORRESPONDENTS or addr in _TAINTED
+                or any(_only_punct_around(addr, r) for r in rcpts)):
+            continue
+        _TAINTED.add(addr)
+    return lines
+
+
+def _only_punct_around(text, addr):
+    """True if text is addr with nothing but punctuation before or after it."""
+    i = text.find(addr)
+    while i != -1:
+        if not any(c.isalnum() for c in text[:i] + text[i + len(addr):]):
+            return True
+        i = text.find(addr, i + 1)
+    return False
 
 
 def _attach_roots():
@@ -1310,7 +1590,7 @@ def _do_reply(args, reply_all):
 
     from_address = args.get("from_address")
     sl = _hstr(msg.get("X-SimpleLogin-Type") or msg.get("X-Simplelogin-Type"))
-    aliased = "forward" in sl.lower()
+    aliased = _simplelogin_forward(msg)
     if not from_address and aliased and ALIAS_FROM:
         from_address = ALIAS_FROM  # keeps the alias masked, see README
     _check_sender(from_address)
@@ -1330,6 +1610,8 @@ def _do_reply(args, reply_all):
 
     note = ("\n  (alias mail, sent from %s so the alias stays masked)" % from_address
             if aliased and from_address else "")
+    if "forward" in sl.lower() and not aliased and not from_address:
+        note = "\n  (%s, so it is from your own address)" % _UNPROVEN_ALIAS
     if args.get("dry_run"):
         if not as_draft:
             _check_recipients(*_envelope_recipients(reply))
@@ -1360,11 +1642,7 @@ def _do_reply(args, reply_all):
 
 
 def tool_reply(args):
-    return _do_reply(args, reply_all=False)
-
-
-def tool_reply_all(args):
-    return _do_reply(args, reply_all=True)
+    return _do_reply(args, reply_all=bool(args.get("all")))
 
 
 def tool_create_draft(args):
@@ -1404,6 +1682,38 @@ def _drafts_folder_of(args, conn):
     return args.get("folder") or _find_drafts_folder(conn)
 
 
+def _expunge_only(conn, uid, copied_to=None):
+    """Expunge uid, already flagged \\Deleted, from the selected mailbox and
+    nothing else. UID EXPUNGE (RFC 4315) touches only this uid. A bare EXPUNGE
+    removes every message flagged \\Deleted, including mail another client
+    marked and could still undelete, so if any other uid here is flagged the
+    target's flag is cleared and the call refused instead."""
+    try:
+        typ, _ = conn.uid("EXPUNGE", uid)
+    except Exception:
+        typ = "NO"
+    if typ == "OK":
+        return
+    try:
+        typ, data = conn.uid("SEARCH", None, "DELETED")
+        others = [u for u in (data[0] or b"").split()
+                  if u.decode() != str(uid)] if typ == "OK" else []
+    except Exception:
+        others = []
+    if others:
+        try:
+            conn.uid("STORE", uid, "-FLAGS", r"(\Deleted)")
+        except Exception:
+            pass
+        raise ToolError(
+            "uid %s was left in place: this server has no UID EXPUNGE, and "
+            "other messages here are already marked deleted, which a plain "
+            "EXPUNGE would remove permanently.%s"
+            % (uid, " A copy is already in '%s'." % copied_to
+               if copied_to else ""))
+    conn.expunge()
+
+
 def _bin_to_trash(conn, uid, trash):
     """Move uid from the selected folder to Trash. Returns False, with the
     message left where it was, if Trash did not take it. The original is
@@ -1421,7 +1731,7 @@ def _bin_to_trash(conn, uid, trash):
     if typ != "OK":
         return False
     conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-    conn.expunge()
+    _expunge_only(conn, uid, trash)
     return True
 
 
@@ -1473,11 +1783,14 @@ def tool_update_draft(args):
         # here on a failure must not read as a failed update, or a retry
         # saves a second copy.
         resynced = binned = False
+        kept = None
         try:
             resynced = _select_checked(conn, folder, None,
                                        readonly=False) != validity
             if not resynced:
                 binned = _bin_to_trash(conn, uid, _special_folder(conn, "trash"))
+        except ToolError as e:
+            kept = str(e).splitlines()[0]
         except Exception:
             binned = False
     finally:
@@ -1492,6 +1805,9 @@ def tool_update_draft(args):
                  "resynced, so uid %s may now be a different message. Find "
                  "the old version with search_mail and remove it with "
                  "delete_draft." % (folder, uid))
+    elif kept:
+        where = ("The previous version is still in '%s' as uid %s: %s"
+                 % (folder, uid, kept))
     else:
         where = ("The previous version could not be moved to Trash and is "
                  "still in '%s' as uid %s." % (folder, uid))
@@ -1523,7 +1839,7 @@ def tool_delete_draft(args):
             if typ != "OK":
                 raise ToolError("Could not move the draft to Trash: %s" % resp)
             conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-            conn.expunge()
+            _expunge_only(conn, uid, trash)
         return "Draft uid %s moved from '%s' to '%s'." % (uid, folder, trash)
     finally:
         try:
@@ -1573,7 +1889,8 @@ def tool_send_draft(args):
     _check_recipients(to, cc, bcc)
     if args.get("dry_run"):
         _check_recipients(*_envelope_recipients(msg))
-        return _dry("send draft uid %s" % uid, _preview(msg))
+        return _dry("send draft uid %s" % uid,
+                    _taint_preview(_preview(msg), msg))
     refused = _smtp_send(msg)
     if refused:
         return (_refused_note(refused) + "Draft sent to the other recipients "
@@ -1586,16 +1903,20 @@ def tool_send_draft(args):
 
     # The message has gone. A cleanup failure from here on must not read as a
     # failed send, or a retry sends it twice.
-    problem, resynced = None, False
+    problem, resynced, kept = None, False, None
     try:
         conn = imap_connect()
         try:
             folder = _drafts_folder_of(args, conn)
             resynced = _select_checked(conn, folder, None,
                                        readonly=False) != validity
-            if not resynced and not _bin_to_trash(
-                    conn, uid, _special_folder(conn, "trash")):
-                problem = "the server refused it"
+            if not resynced:
+                try:
+                    if not _bin_to_trash(conn, uid,
+                                         _special_folder(conn, "trash")):
+                        problem = "the server refused it"
+                except ToolError as e:
+                    kept = str(e).splitlines()[0]
         finally:
             try:
                 conn.logout()
@@ -1608,6 +1929,9 @@ def tool_send_draft(args):
                 "'%s' was resynced, so uid %s may now be a different message. "
                 "Do not send it again; find it with search_mail and remove it "
                 "with delete_draft." % (folder, uid))
+    elif kept:
+        note = ("The message WAS SENT. The draft is still in '%s' as uid %s: "
+                "%s Do not send it again." % (folder, uid, kept))
     elif problem:
         note = ("The message WAS SENT, but the draft could not be moved to "
                 "Trash (%s). It is still in '%s' as uid %s. Do not send it "
@@ -1721,19 +2045,38 @@ def tool_unsubscribe(args):
            "\n\nWorth knowing: " + advice[-1] if aliased else ""))
 
 
+def _one_or_many(args, single, plural):
+    """True when a call names several targets under `plural` (uids, labels),
+    False when it names one under `single` (uid, label). Never both, so a call
+    cannot be read two ways."""
+    one = args.get(single) is not None
+    many = args.get(plural) is not None
+    if one and many:
+        raise ToolError("Pass '%s' for one or '%s' for several, not both. "
+                        "Nothing was changed." % (single, plural))
+    if not one and not many:
+        raise ToolError("'%s' is required, or '%s' to act on several."
+                        % (single, plural))
+    return many
+
+
+_MARK_FLAGS = {
+    "read": ("+FLAGS", r"(\Seen)"),
+    "unread": ("-FLAGS", r"(\Seen)"),
+    "star": ("+FLAGS", r"(\Flagged)"),
+    "unstar": ("-FLAGS", r"(\Flagged)"),
+}
+
+
 def tool_mark(args):
+    if _one_or_many(args, "uid", "uids"):
+        return _mark_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     action = args["action"]  # read | unread | star | unstar
-    mapping = {
-        "read": ("+FLAGS", r"(\Seen)"),
-        "unread": ("-FLAGS", r"(\Seen)"),
-        "star": ("+FLAGS", r"(\Flagged)"),
-        "unstar": ("-FLAGS", r"(\Flagged)"),
-    }
-    if action not in mapping:
+    if action not in _MARK_FLAGS:
         raise ToolError("action must be one of: read, unread, star, unstar")
-    op, flag = mapping[action]
+    op, flag = _MARK_FLAGS[action]
     conn = imap_connect()
     try:
         dry = bool(args.get("dry_run"))
@@ -1785,6 +2128,8 @@ def _resolve_label(conn, label):
 
 def tool_apply_label(args):
     """Tag a message. The message stays where it is."""
+    if _one_or_many(args, "uid", "uids"):
+        return _apply_label_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     conn = imap_connect()
@@ -1824,6 +2169,8 @@ def _message_id_of(conn, uid, folder):
                        "(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM)])")
     if typ != "OK" or not md or md[0] is None:
         raise ToolError("Message uid %s not found in '%s'." % (uid, folder))
+    # Its Subject and From reach the model in previews, so they are shown text.
+    _taint_shown_headers(email.message_from_bytes(md[0][1]))
     return _parse_envelope(md[0][1])
 
 
@@ -1872,18 +2219,11 @@ def _label_copy_uid(conn, label_mailbox, message_id):
 
 
 def _drop_label_copy(conn, copy_uid):
-    """Expunge one copy out of the currently-selected label mailbox. UID EXPUNGE
-    (RFC 4315) touches only this uid; a bare EXPUNGE would take anything else in
-    the mailbox already flagged \\Deleted with it, so it's the fallback."""
+    """Expunge one copy out of the currently-selected label mailbox."""
     typ, resp = conn.uid("STORE", copy_uid, "+FLAGS", r"(\Deleted)")
     if typ != "OK":
         raise ToolError("Could not flag the label copy for removal: %s" % resp)
-    try:
-        typ, _ = conn.uid("EXPUNGE", copy_uid)
-    except imaplib.IMAP4.error:
-        typ = "NO"
-    if typ != "OK":
-        conn.expunge()
+    _expunge_only(conn, copy_uid)
 
 
 def _resolve_label_for_removal(conn, label, folder):
@@ -1912,6 +2252,8 @@ def _resolve_label_for_removal(conn, label, folder):
 
 def tool_remove_label(args):
     """Take a label off a message. The message stays where it is."""
+    if _one_or_many(args, "uid", "uids"):
+        return _remove_label_many(args)
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to remove a label without confirmed=true. "
                         "Preview it with dry_run=true first if you are unsure.")
@@ -1942,7 +2284,7 @@ def tool_remove_label(args):
             pass
 
 
-def tool_bulk_remove_label(args):
+def _remove_label_many(args):
     """Take one label off many messages. Gated, like the single version."""
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing a bulk label removal without confirmed=true. "
@@ -1950,16 +2292,18 @@ def tool_bulk_remove_label(args):
                         "dry_run=true first, then confirm.")
     folder = args.get("folder", "INBOX")
     uids = _parse_uids(args)
-    if args.get("dry_run"):
-        return ("DRY RUN, nothing changed. Would remove label '%s' from %d "
-                "message(s) in '%s':\n  %s"
-                % (args["label"], len(uids), folder, ", ".join(uids)))
     conn = imap_connect()
     done, absent, failed = [], [], []
     try:
         target = _resolve_label_for_removal(conn, args["label"], folder)
         # Message-IDs come from the source folder, before switching mailbox.
-        _select_checked(conn, folder, args.get("uidvalidity"), readonly=True)
+        validity = _select_checked(conn, folder, args.get("uidvalidity"),
+                                   readonly=True)
+        if args.get("dry_run"):
+            return _dry("remove label '%s' from %d message(s) in '%s' "
+                        "(uidvalidity %s)" % (target, len(uids), folder,
+                                              validity or "unknown"),
+                        [_describe(conn, folder, u) for u in uids])
         mids = {}
         for uid in uids:
             try:
@@ -2006,6 +2350,8 @@ def tool_bulk_remove_label(args):
 
 def tool_move_to_folder(args):
     """Filing = MOVE into Folders/<name> (or Archive/Trash)."""
+    if _one_or_many(args, "uid", "uids"):
+        return _move_many(args)
     folder = args.get("folder", "INBOX")
     uid = _uidval(args["uid"])
     dest = args["to_folder"]
@@ -2028,7 +2374,7 @@ def tool_move_to_folder(args):
                 raise ToolError("Move to '%s' failed: %s. Try list_folders."
                                 % (dest, resp))
             conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-            conn.expunge()
+            _expunge_only(conn, uid, dest)
         return "Moved uid %s from '%s' to '%s'." % (uid, folder, dest)
     finally:
         try:
@@ -2055,7 +2401,11 @@ def _smtp_send(msg):
     mode = _security_mode("PROTON_SMTP_SECURITY", SMTP_PORT)
     ctx = _tls_context(SMTP_HOST)
     smtp_user, smtp_pw = smtp_credentials()
-    _check_recipients(*_envelope_recipients(msg))
+    rcpts = _envelope_recipients(msg)
+    _check_recipients(*rcpts)
+    # The send budget counts mail sent, one unit per recipient. The dispatcher
+    # has already charged this call as one.
+    _rate_check("send", len(rcpts) - 1)
     try:
         if mode == "ssl":
             server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=30, context=ctx)
@@ -2157,7 +2507,7 @@ def tool_forward(args):
                        subtype="rfc822", filename="original.eml")
     if args.get("dry_run"):
         _check_recipients(*_envelope_recipients(fwd))
-        return _dry("forward uid %s" % uid, _preview(fwd))
+        return _dry("forward uid %s" % uid, _taint_preview(_preview(fwd), fwd))
     refused = _smtp_send(fwd)
     return _refused_note(refused) + "Forwarded uid %s to %s." % (uid, to)
 
@@ -2188,6 +2538,10 @@ _LOCAL_PUNCT = frozenset(".!#$%&'*+/=?^`{|}~-")
 _DOMAIN_RUN = re.compile(r"[\w.-]+")
 _CORRESPONDENTS = set()   # from headers — safe to reply to
 _TAINTED = set()          # from untrusted content — refused as recipients
+# _TAINTED is also saved in STATE_FILE, so a restarted server still refuses
+# it. Hostile mail could fill the saved list, so it is never trimmed: past
+# this many addresses every recipient outside the headers is refused instead.
+TAINT_CAP = 20000
 
 
 def _note_headers(msg):
@@ -2195,6 +2549,22 @@ def _note_headers(msg):
         for _, addr in email.utils.getaddresses([msg.get(h) or ""]):
             if addr:
                 _CORRESPONDENTS.add(addr.lower())
+
+
+def _taint_shown_headers(msg):
+    """For a message whose headers are shown to the model. The Subject and the
+    names beside the header addresses are text the sender wrote, so an address
+    in them is tainted, like one in a body. The parsed header addresses are
+    left out here and not made correspondents: only _note_headers does that."""
+    own = set()
+    for h in ("From", "To", "Cc", "Reply-To", "Sender"):
+        for _, addr in email.utils.getaddresses([_hstr(msg.get(h))]):
+            if addr:
+                own.add(addr.lower())
+    for h in ("Subject", "From", "To", "Cc", "Reply-To", "Sender"):
+        for addr in _find_addresses(_decode(_hstr(msg.get(h)))):
+            if addr.lower() not in own:
+                _taint_text(addr)
 
 
 def _find_addresses(text):
@@ -2221,24 +2591,50 @@ def _find_addresses(text):
     return found
 
 
+_UNSAVED = set()   # refused addresses a failed save could not write yet
+
+
 def _taint_text(text):
     """Every address the server hands to the model out of untrusted content."""
+    new = set()
     for addr in _find_addresses(text or ""):
         addr = addr.lower()
-        if addr not in _CORRESPONDENTS:
-            _TAINTED.add(addr)
+        if addr not in _CORRESPONDENTS and addr not in _TAINTED:
+            new.add(addr)
+    _TAINTED.update(new)
+    # Addresses a failed save left only in memory go out with the next save,
+    # so a restart after the disk recovers still refuses them.
+    pending = new | _UNSAVED
+    if not pending:
+        return
+    try:
+        with _state_lock():
+            state = _load_state()
+            if state is None:
+                _UNSAVED.update(pending)
+                return   # left for the owner; _check_recipients fails closed
+            saved = _saved_taint(state)
+            room = max(0, TAINT_CAP - len(saved))
+            fresh = sorted(pending - saved)
+            if len(fresh) > room:
+                state["taint_overflow"] = True
+            state["tainted"] = sorted(saved) + fresh[:room]
+            _replace_state(state)
+        _UNSAVED.clear()
+    except OSError:
+        _UNSAVED.update(pending)   # the read still succeeds; retried later
 
 
-def _is_tainted(addr):
+def _is_tainted(addr, tainted):
     """True if addr appears inside a tainted match, starting after a
     non-alphanumeric character (or the start) and ending before one (or the
     end). 'attacker@evil.example' is in 'report.attacker@evil.example.thanks'."""
-    if addr in _TAINTED:
+    if addr in tainted:
         return True
     local, _, domain = addr.rpartition("@")
     if not local:
         return False
-    for t in _TAINTED:
+    for t in tainted:
         tl, _, td = t.rpartition("@")
         if (tl.endswith(local) and not tl[:-len(local)][-1:].isalnum()
                 and td.startswith(domain) and not td[len(domain):][:1].isalnum()):
@@ -2292,6 +2688,10 @@ _EMPTY_GROUPS_RE = re.compile(r'(?:[^:;<>@,"]*:\s*;(?:\s*,)?)+\s*')
 def _check_recipients(*fields):
     """Refuse any recipient known only from untrusted content. No override."""
     allow = _allowed_recipients()
+    state = _load_state()
+    unreadable = state is None
+    state = state or {}
+    tainted = _TAINTED | _saved_taint(state)
     for field in fields:
         if field is None:
             field = ""
@@ -2309,7 +2709,25 @@ def _check_recipients(*fields):
             a = (addr or "").lower()
             if not a or a in _CORRESPONDENTS or a in allow:
                 continue
-            if _is_tainted(a):
+            if unreadable:
+                raise ToolError(
+                    "BLOCKED: refusing to send to '%s'.\n\n"
+                    "%s could not be read, so the addresses saved as refused "
+                    "recipients cannot be checked, and every recipient that is "
+                    "not in a message header is refused. The user can add it "
+                    "to PROTON_ALLOWED_RECIPIENTS, or fix or delete that "
+                    "file (deleting it also resets polling cursors and rate "
+                    "counters)." % (a, STATE_FILE))
+            if state.get("taint_overflow"):
+                raise ToolError(
+                    "BLOCKED: refusing to send to '%s'.\n\n"
+                    "Messages read so far held more than %d addresses, too "
+                    "many to remember one by one, so every recipient that is "
+                    "not in a message header is refused. The user can add it "
+                    "to PROTON_ALLOWED_RECIPIENTS, or delete %s (this also "
+                    "resets polling cursors and rate counters), then restart."
+                    % (a, TAINT_CAP, STATE_FILE))
+            if _is_tainted(a, tainted):
                 raise ToolError(
                     "BLOCKED — refusing to send to '%s'.\n\n"
                     "That address was harvested from untrusted message or "
@@ -2332,22 +2750,63 @@ def _persist_dir():
     return os.path.join(os.path.realpath(ATTACH_DIR), "persist")
 
 
+def _noted(state):
+    noted = state.get("saved_attachments")
+    return [e for e in noted if isinstance(e, list) and len(e) == 4] \
+        if isinstance(noted, list) else []
+
+
+def _record_saved(path, st):
+    """Note a file save_attachment wrote, so the sweep can tell it apart from
+    the owner's own files in the same folder. Only top-level saves are noted,
+    because only the top level is swept."""
+    try:
+        state = _read_state()
+        saved = [e for e in _noted(state) if e[0] != path]
+        saved.append([path, st.st_dev, st.st_ino, st.st_mtime_ns])
+        state["saved_attachments"] = saved
+        _write_state(state)
+    except Exception:
+        pass
+
+
+def _saved_files():
+    """-> [(path, mtime)] of top-level files in ATTACH_DIR this server saved
+    and nobody has replaced or changed since. Forgets the rest."""
+    root = os.path.realpath(ATTACH_DIR)
+    state = _read_state()
+    noted = _noted(state)
+    found, kept = [], []
+    for e in noted:
+        path, dev, ino, mtime_ns = e
+        try:
+            st = os.lstat(path)
+        except (TypeError, ValueError, OSError):
+            continue
+        if (st.st_dev, st.st_ino, st.st_mtime_ns) != (dev, ino, mtime_ns):
+            continue
+        kept.append(e)
+        if os.path.dirname(path) == root and os.path.isfile(path):
+            found.append((path, st.st_mtime))
+    if kept != state.get("saved_attachments", []):
+        try:
+            state["saved_attachments"] = kept
+            _write_state(state)
+        except Exception:
+            pass
+    return found
+
+
 def _sweep_attachments(force=False):
     """Ephemeral by default: files vanish after TTL so nothing lingers for the
     user to double-click. Runs before every tool call — the server is stateless
-    per call, so a sweep is the only cleanup that survives interrupted runs."""
-    root = os.path.realpath(ATTACH_DIR)
-    if not os.path.isdir(root):
-        return 0
-    keep = _persist_dir()
+    per call, so a sweep is the only cleanup that survives interrupted runs.
+    Only files this server saved are removed, never the owner's own."""
     now = time.time()
     removed = 0
-    for entry in os.listdir(root):
-        path = os.path.join(root, entry)
-        if os.path.realpath(path) == keep or os.path.isdir(path):
-            continue
+    for path, mtime in _saved_files():
         try:
-            if force or (now - os.path.getmtime(path)) > ATTACH_TTL:
+            if force or (now - mtime) > ATTACH_TTL:
                 os.remove(path)
                 removed += 1
         except OSError:
@@ -2433,6 +2892,7 @@ def _iter_attachments(raw):
         if not kind:
             continue
         payload = part.get_payload(decode=True) or b""
+        _taint_text(part.get_filename())  # the sender chose it
         out.append({"filename": part.get_filename() or "(unnamed)",
                     "ctype": part.get_content_type(), "size": len(payload),
                     "kind": kind, "payload": payload})
@@ -2542,22 +3002,28 @@ def tool_read_attachment(args):
             conn.logout()
         except Exception:
             pass
-    items = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
-    if not items:
-        raise ToolError("No document attachments on uid %s in '%s'." % (uid, folder))
-    if want:
-        match = [a for a in items if a["filename"].lower() == want.lower()] or \
-                [a for a in items if want.lower() in a["filename"].lower()]
-        if not match:
-            raise ToolError("No attachment matching '%s'. Present: %s"
-                            % (want, ", ".join(a["filename"] for a in items)))
-        att = match[0]
-    elif len(items) == 1:
-        att = items[0]
+    if args.get("include_inline"):
+        att = _pick_attachment(raw, want, include_inline=True)
     else:
-        raise ToolError("Multiple attachments — name one via 'filename': %s"
-                        % ", ".join(a["filename"] for a in items))
+        items = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
+        if not items and not want:
+            raise ToolError("No document attachments on uid %s in '%s'. Name "
+                            "one via 'filename', or pass include_inline=true "
+                            "to include inline images." % (uid, folder))
+        if want:
+            match = [a for a in items if a["filename"].lower() == want.lower()] or \
+                    [a for a in items if want.lower() in a["filename"].lower()]
+            # A name no document has may be an inline image, which
+            # view_attachment always searched.
+            att = match[0] if match else _pick_attachment(raw, want, include_inline=True)
+        elif len(items) == 1:
+            att = items[0]
+        else:
+            raise ToolError("Multiple attachments — name one via 'filename': %s"
+                            % ", ".join(a["filename"] for a in items))
 
+    if att["ctype"].startswith("image/"):
+        return _image_result(att)
     if att["size"] > MAX_ATTACH_BYTES:
         raise ToolError("'%s' is %d bytes, over the %d MB cap. Raise "
                         "PROTON_MAX_ATTACH_MB if you trust this message."
@@ -2569,8 +3035,9 @@ def tool_read_attachment(args):
                                                 "message/rfc822", "text/calendar"):
         text = data.decode("utf-8", "replace")[:20000]
     else:
-        raise ToolError("'%s' is %s — not text-extractable. Use save_attachment "
-                        "to write it to disk and open it." % (att["filename"], ctype))
+        raise ToolError("'%s' is %s — neither text nor an image. Use "
+                        "save_attachment to write it to disk and open it."
+                        % (att["filename"], ctype))
     _taint_text(text)
     return "%s--- %s (%s, %d bytes) ---\n\n%s" % (
         UNTRUSTED_BANNER, att["filename"], ctype, att["size"], text)
@@ -2594,32 +3061,14 @@ def _pick_attachment(raw, want, include_inline=False):
                     % ", ".join(a["filename"] for a in items))
 
 
-def tool_view_attachment(args):
-    """Return an image attachment as a viewable image.
+def _image_result(att):
+    """An image attachment as a viewable image.
 
     Images only, deliberately. A client hands an image block to the model as a
     real image, so this is the only way to actually look at a photo or a scan.
     Base64 of anything else is just characters in the conversation that the
     model cannot interpret, at a third more bytes than the file itself, so
-    those are pushed back to read_attachment or save_attachment instead."""
-    folder = args.get("folder", "INBOX")
-    uid = _uidval(args["uid"])
-    conn = imap_connect()
-    try:
-        raw = _fetch_raw(conn, folder, uid, args.get("uidvalidity"))
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-    att = _pick_attachment(raw, args.get("filename"), include_inline=True)
-    if not att["ctype"].startswith("image/"):
-        raise ToolError(
-            "'%s' is %s, not an image. This tool only returns images, because "
-            "base64 of anything else costs a third more than the file itself "
-            "and the model cannot read it. Use read_attachment for text and "
-            "PDFs, or save_attachment to put it on disk."
-            % (att["filename"], att["ctype"]))
+    read_attachment returns those as text or sends them to save_attachment."""
     if att["size"] > MAX_FETCH_BYTES:
         raise ToolError(
             "'%s' is %.1f MB, over the %d MB limit for inline images. Use "
@@ -2699,6 +3148,10 @@ def tool_save_attachment(args):
             continue
         with os.fdopen(fd, "wb") as f:
             f.write(a["payload"])
+            f.flush()
+            st = os.fstat(f.fileno())
+        if not persist and dest == os.path.realpath(ATTACH_DIR):
+            _record_saved(path, st)
         saved.append("%s  (%d bytes%s)" % (
             path, a["size"],
             "" if n == 1 else "; %s was in use, so nothing was replaced" % base))
@@ -2770,6 +3223,7 @@ def tool_find_thread(args):
             if typ != "OK" or not md or md[0] is None:
                 raise ToolError("uid %s not found in '%s'." % (uid, folder))
             tmsg = email.message_from_bytes(md[0][1])
+            _taint_shown_headers(tmsg)
             subject = _decode(tmsg.get("Subject"))
             target_ids = _msgids(tmsg, "Message-ID", "References", "In-Reply-To")
         base = _base_subject(subject).lower()
@@ -2796,6 +3250,7 @@ def tool_find_thread(args):
                 continue
             raw = md[0][1]
             env = _parse_envelope(raw)
+            _taint_shown_headers(email.message_from_bytes(raw))
             docs = [a for a in _iter_attachments(raw) if a["kind"] == "document"]
             rows.append("[%s uid %s] %s\n    from: %s\n    date: %s\n    docs: %s"
                         % (allbox, u, env["subject"] or "(no subject)", env["from"],
@@ -2815,11 +3270,7 @@ def tool_purge_attachments(args):
     """Delete every non-persisted saved attachment immediately."""
     root = os.path.realpath(ATTACH_DIR)
     if args.get("dry_run"):
-        try:
-            names = [f for f in os.listdir(root)
-                     if os.path.isfile(os.path.join(root, f))]
-        except OSError:
-            names = []
+        names = [os.path.basename(p) for p, _ in _saved_files()]
         return _dry("delete %d ephemeral file(s) from %s" % (len(names), root),
                     names or ["(nothing to delete)"])
     n = _sweep_attachments(force=True)
@@ -2850,18 +3301,25 @@ def _parse_uids(args):
     return out
 
 
-def _bulk(args, verb, apply_one, readonly=False):
+def _bulk(args, verb, apply_one, readonly=False, check=None):
     """Shared bulk driver. One connection for the whole batch instead of one
-    per message, and one failure doesn't abandon the rest."""
+    per message, and one failure doesn't abandon the rest. A dry run makes the
+    same checks as the real run and names each message, as the single-message
+    previews do."""
     folder = args.get("folder", "INBOX")
     uids = _parse_uids(args)
-    if args.get("dry_run"):
-        return ("DRY RUN, nothing changed. Would %s %d message(s) in '%s':\n  %s"
-                % (verb, len(uids), folder, ", ".join(uids)))
+    dry = bool(args.get("dry_run"))
     conn = imap_connect()
     done, failed = [], []
     try:
-        _select_checked(conn, folder, args.get("uidvalidity"), readonly=readonly)
+        if check:
+            check(conn)
+        validity = _select_checked(conn, folder, args.get("uidvalidity"),
+                                   readonly=readonly or dry)
+        if dry:
+            return _dry("%s %d message(s) in '%s' (uidvalidity %s)"
+                        % (verb, len(uids), folder, validity or "unknown"),
+                        [_describe(conn, folder, u) for u in uids])
         for uid in uids:
             try:
                 apply_one(conn, uid)
@@ -2882,13 +3340,11 @@ def _bulk(args, verb, apply_one, readonly=False):
     return out
 
 
-def tool_bulk_mark(args):
+def _mark_many(args):
     action = args["action"]
-    mapping = {"read": ("+FLAGS", r"(\Seen)"), "unread": ("-FLAGS", r"(\Seen)"),
-               "star": ("+FLAGS", r"(\Flagged)"), "unstar": ("-FLAGS", r"(\Flagged)")}
-    if action not in mapping:
+    if action not in _MARK_FLAGS:
         raise ToolError("action must be one of: read, unread, star, unstar")
-    op, flag = mapping[action]
+    op, flag = _MARK_FLAGS[action]
 
     def one(conn, uid):
         typ, resp = conn.uid("STORE", uid, op, flag)
@@ -2897,28 +3353,35 @@ def tool_bulk_mark(args):
     return _bulk(args, "mark as %s" % action, one)
 
 
-def tool_bulk_apply_label(args):
+def _apply_label_many(args):
     label = args["label"]
     resolved = {}
 
+    def check(conn):
+        # Resolved once, on the batch's own connection, before any change.
+        resolved["target"] = _resolve_label(conn, label)
+
     def one(conn, uid):
-        # Resolved once, on the batch's own connection.
-        if "target" not in resolved:
-            resolved["target"] = _resolve_label(conn, label)
         typ, resp = conn.uid("COPY", uid, _folder_quote(resolved["target"]))
         if typ != "OK":
             raise RuntimeError(resp)
-    return _bulk(args, "label '%s'" % label, one)
+    return _bulk(args, "label '%s'" % label, one, check=check)
 
 
-def tool_bulk_move(args):
+def _move_many(args):
     """Gated: relocating a batch (Trash included) is the highest-blast-radius
     thing here. Marking and labelling are trivially reversible, this isn't."""
-    if not args.get("confirmed"):
+    if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing a bulk move without confirmed=true. Show the "
                         "user the uids and destination, or call with dry_run=true "
                         "first, then confirm.")
     dest = args["to_folder"]
+
+    def check(conn):
+        # INBOX is case-insensitive in IMAP (RFC 3501); other names are not.
+        if dest.upper() != "INBOX" and dest not in _list_folders(conn):
+            raise ToolError("No folder called '%s'. Nothing was moved; "
+                            "list_folders shows the exact names." % dest)
 
     def one(conn, uid):
         try:
@@ -2930,8 +3393,8 @@ def tool_bulk_move(args):
             if typ != "OK":
                 raise RuntimeError("copy failed")
             conn.uid("STORE", uid, "+FLAGS", r"(\Deleted)")
-            conn.expunge()
-    return _bulk(args, "move to '%s'" % dest, one)
+            _expunge_only(conn, uid, dest)
+    return _bulk(args, "move to '%s'" % dest, one, check=check)
 
 
 def _status_values(data):
@@ -2968,7 +3431,9 @@ def tool_poll_mailbox(args):
     only safe move is to start again from the new head rather than guess.
 
     Nothing is marked read. Pass advance=false to look without committing, then
-    confirm with ack_folder once the batch is genuinely handled."""
+    confirm with commit once the batch is genuinely handled."""
+    if args.get("commit") is not None:
+        return _commit_checkpoint(args)
     folder = args.get("folder", "INBOX")
     limit = max(1, min(int(args.get("limit", 20)), 100))
     advance = args.get("advance", True)
@@ -3014,6 +3479,7 @@ def tool_poll_mailbox(args):
             if typ != "OK" or not md or md[0] is None:
                 continue
             env = _parse_envelope(md[0][1])
+            _taint_shown_headers(email.message_from_bytes(md[0][1]))
             rows.append("[uid %d] %s\n    from: %s\n    date: %s"
                         % (uid, env["subject"] or "(no subject)", env["from"],
                            env["date"]))
@@ -3024,11 +3490,11 @@ def tool_poll_mailbox(args):
             _write_state(state)
             tail = "Cursor advanced to uid %d." % batch[-1]
         else:
-            # Remember the furthest checkpoint issued, so ack_folder can
+            # Remember the furthest checkpoint issued, so a commit can
             # refuse a uid no poll reported.
             cursor["issued"] = max(int(cursor.get("issued", 0)), batch[-1])
             _write_state(state)
-            tail = ("Cursor NOT moved. Call ack_folder with checkpoint '%s' "
+            tail = ("Cursor NOT moved. Call poll_folder with commit '%s' "
                     "once these are handled; until then another poll returns "
                     "the same batch." % checkpoint)
         return ("%d new message(s) in '%s'%s:\n\n%s\n\n%s"
@@ -3042,13 +3508,13 @@ def tool_poll_mailbox(args):
             pass
 
 
-def tool_ack_mailbox(args):
+def _commit_checkpoint(args):
     """Commit a checkpoint from poll_folder. Safe to repeat."""
     folder = args.get("folder", "INBOX")
-    checkpoint = str(args.get("checkpoint", "")).strip()
+    checkpoint = str(args.get("commit", "")).strip()
     validity, _, uid = checkpoint.partition(":")
     if not validity or not uid.isdigit():
-        raise ToolError("checkpoint should look like '<uidvalidity>:<uid>', "
+        raise ToolError("commit should look like '<uidvalidity>:<uid>', "
                         "exactly as poll_folder reported it.")
     state = _read_state()
     cursor = (state.get("cursors") or {}).get(folder) or {}
@@ -3065,14 +3531,14 @@ def tool_ack_mailbox(args):
         raise ToolError(
             "poll_folder has not reported uid %s for '%s', so that checkpoint "
             "was not issued by it. Nothing was changed. Call poll_folder with "
-            "advance=false and ack the checkpoint it reports." % (uid, folder))
+            "advance=false and commit the checkpoint it reports." % (uid, folder))
     cursor = dict(cursor, uidvalidity=validity, last_uid=int(uid))
     state.setdefault("cursors", {})[folder] = cursor
     _write_state(state)
     return "Cursor for '%s' committed at uid %s." % (folder, uid)
 
 
-def tool_folder_status(args):
+def _folder_status(args):
     """Counts plus the UIDVALIDITY that every uid in this folder depends on."""
     folder = args.get("folder", "INBOX")
     conn = imap_connect()
@@ -3122,6 +3588,89 @@ def tool_create_mailbox(args):
         if typ != "OK":
             raise ToolError("Create failed for '%s': %s" % (target, resp))
         return "Created %s '%s'." % (kind, target)
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
+# Every RFC 6154 SPECIAL-USE flag. A mailbox carrying one is the server's own,
+# so renaming it is refused even where _SPECIAL has no entry for it.
+_SPECIAL_USE_FLAGS = (r"\all", r"\archive", r"\drafts", r"\flagged",
+                      r"\important", r"\junk", r"\sent", r"\trash")
+
+
+def _is_special_mailbox(name, flags=""):
+    """INBOX, or a mailbox the server marks as special or that _special_folder
+    would take for one by its name."""
+    return (name.upper() == "INBOX"
+            or any(f in flags.split() for f in _SPECIAL_USE_FLAGS)
+            or any(name.lower() in names for _flag, names in _SPECIAL.values()))
+
+
+def tool_rename_mailbox(args):
+    """Rename a folder or label where it stands. GATED, like creating one: it
+    changes mailbox structure, and the request may originate from untrusted
+    email content. The new name is a leaf, so a label stays a label and a
+    folder keeps its parent, and nothing here can move one mailbox under
+    another or onto a special one."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to rename a folder or label without "
+                        "confirmed=true. Show the user the old and new names, "
+                        "get a yes first.")
+    name = (args.get("name") or "").strip()
+    new_name = (args.get("new_name") or "").strip()
+    if not name or not new_name:
+        raise ToolError("'name' and 'new_name' are both required.")
+    _imap_str(name, "name")
+    if re.search(r'[/\\"\x00-\x1f]', new_name):
+        raise ToolError("new_name may not contain slashes, quotes or control "
+                        "characters. It is the new name only, without a "
+                        "'Labels/' or 'Folders/' prefix.")
+    conn = imap_connect()
+    try:
+        typ, data = conn.list()
+        boxes = {}
+        for raw in (data or []) if typ == "OK" else []:
+            parsed = _parse_list_entry(raw)
+            if parsed is not None:
+                boxes[parsed[2]] = parsed[:2]
+        if name not in boxes:
+            raise ToolError("No folder or label called '%s'. Run list_folders "
+                            "for exact names." % name)
+        flags, delim = boxes[name]
+        if _is_special_mailbox(name, flags):
+            raise ToolError(
+                "'%s' is one of the server's own mailboxes (INBOX, Sent, "
+                "Drafts, Trash, Spam, Archive, All Mail and the like). Mail "
+                "is filed there by name, so it is not renamed here." % name)
+        if name in ("Labels", "Folders") and any(
+                b.startswith(name + "/") for b in boxes):
+            raise ToolError("'%s' is the namespace itself, not a folder or "
+                            "label." % name)
+        if delim and delim in new_name:
+            raise ToolError("new_name may not contain '%s', the hierarchy "
+                            "separator on this server." % delim)
+        parent = name.rsplit(delim, 1)[0] + delim if delim and delim in name else ""
+        target = parent + new_name
+        if target == name:
+            return "'%s' already has that name, nothing to do." % name
+        if _is_special_mailbox(target):
+            raise ToolError("'%s' is the name of one of the server's own "
+                            "mailboxes, so nothing is renamed to it." % target)
+        clash = [b for b in boxes if b.lower() == target.lower() and b != name]
+        if clash:
+            raise ToolError("'%s' already exists. Nothing was renamed."
+                            % clash[0])
+        if args.get("dry_run"):
+            return _dry("rename '%s'" % name,
+                        ["to '%s'" % target,
+                         "the mail in it stays in it, under the new name"])
+        typ, resp = conn.rename(_folder_quote(name), _folder_quote(target))
+        if typ != "OK":
+            raise ToolError("Rename of '%s' failed: %s" % (name, resp))
+        return "Renamed '%s' to '%s'." % (name, target)
     finally:
         try:
             conn.logout()
@@ -3248,6 +3797,8 @@ def _parse_labels(args):
 
 def tool_delete_label(args):
     """Delete a label outright. Every message keeps its place and loses the tag."""
+    if _one_or_many(args, "label", "labels"):
+        return _delete_labels_many(args)
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to delete a label without confirmed=true. "
                         "Preview it with dry_run=true first to see how many "
@@ -3273,7 +3824,7 @@ def tool_delete_label(args):
             pass
 
 
-def tool_bulk_delete_labels(args):
+def _delete_labels_many(args):
     """Delete several labels in one pass. Same rules as delete_label."""
     if not args.get("dry_run") and not args.get("confirmed"):
         raise ToolError("Refusing to delete labels without confirmed=true. "
@@ -3328,57 +3879,46 @@ TOOLS = [
         "name": "list_folders",
         "description": "List all Proton folders and labels available over the "
                        "Bridge. Call this first to learn exact folder/label "
-                       "names for filing and tagging.",
-        "inputSchema": {"type": "object", "properties": {}},
-        "handler": tool_list_folders,
-    },
-    {
-        "name": "folder_status",
-        "description": "Message counts plus UIDNEXT and UIDVALIDITY for a folder. "
-                       "UIDs are only valid within one UIDVALIDITY generation, so "
-                       "check this before acting on uids noted earlier.",
+                       "names for filing and tagging. Pass folder to get that "
+                       "folder's message counts plus UIDNEXT and UIDVALIDITY "
+                       "instead: UIDs are only valid within one UIDVALIDITY "
+                       "generation, so check it before acting on uids noted "
+                       "earlier.",
         "inputSchema": {
             "type": "object",
-            "properties": {"folder": {"type": "string", "description": "Default INBOX."}},
+            "properties": {"folder": {"type": "string", "description": "Report this one folder's counts and UIDVALIDITY instead of listing every folder."}},
         },
-        "handler": tool_folder_status,
+        "handler": tool_list_folders,
     },
     {
         "name": "poll_folder",
         "description": "Messages that have arrived since the last poll. The very "
                        "first poll emits nothing and just records where the "
                        "mailbox ends, so turning this on does not replay the "
-                       "backlog. Marks nothing as read.",
+                       "backlog. Marks nothing as read. Pass commit to commit "
+                       "a checkpoint an advance=false poll returned; repeating "
+                       "that is harmless.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "limit": {"type": "integer", "description": "Most per call, 1 to 100 (default 20)."},
-                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with ack_folder."},
+                "advance": {"type": "boolean", "description": "Default true. Set false to look without committing, then confirm with commit."},
+                "commit": {"type": "string", "description": "A checkpoint '<uidvalidity>:<uid>', exactly as an advance=false poll reported it. Commits it instead of polling."},
             },
         },
         "handler": tool_poll_mailbox,
     },
     {
-        "name": "ack_folder",
-        "description": "Commit a checkpoint returned by poll_folder with "
-                       "advance=false. Repeating it is harmless.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folder": {"type": "string", "description": "Default INBOX."},
-                "checkpoint": {"type": "string", "description": "Exactly as poll_folder reported it."},
-            },
-            "required": ["checkpoint"],
-        },
-        "handler": tool_ack_mailbox,
-    },
-    {
         "name": "search_mail",
         "description": "Search a folder. Combine any of: text, from, subject, "
                        "since (DD-Mon-YYYY), unread_only, flagged_only. Returns "
-                       "uids + envelopes, newest first. Set include_locations to "
-                       "also report which labels and folders each message carries.",
+                       "uids + envelopes, newest first. With no filters it lists "
+                       "the newest messages in the folder. Set include_locations to "
+                       "also report which labels and folders each message carries. "
+                       "Set all_folders to search every mailbox at once when you "
+                       "do not know where something is: duplicates collapse by "
+                       "Message-ID and each row says where the message lives.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3390,32 +3930,13 @@ TOOLS = [
                 "before": {"type": "string", "description": "DD-Mon-YYYY. Combine with since for a date range."},
                 "unread_only": {"type": "boolean"},
                 "flagged_only": {"type": "boolean"},
-                "limit": {"type": "integer", "description": "Max results (default 15)."},
+                "limit": {"type": "integer", "description": "Max results (default 15, or the most recent 25 with all_folders)."},
+                "all_folders": {"type": "boolean", "description": "Search every mailbox instead of one folder. Takes no folder, uidvalidity or include_locations."},
                 "include_locations": {"type": "boolean", "description": "Report every other mailbox each message appears in, so you can tell what it is already labelled or filed as without a second search. Costs one search per mailbox."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
             },
         },
         "handler": tool_search_mail,
-    },
-    {
-        "name": "search_all_mail",
-        "description": "Search every mailbox at once and collapse duplicates by "
-                       "Message-ID, reporting where each message lives. Use when "
-                       "you do not know which folder something is in.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "text": {"type": "string"},
-                "from": {"type": "string"},
-                "subject": {"type": "string"},
-                "since": {"type": "string", "description": "DD-Mon-YYYY."},
-                "before": {"type": "string", "description": "DD-Mon-YYYY. Combine with since for a date range."},
-                "unread_only": {"type": "boolean"},
-                "flagged_only": {"type": "boolean"},
-                "limit": {"type": "integer", "description": "Most recent N (default 25)."},
-            },
-        },
-        "handler": tool_search_all_mail,
     },
     {
         "name": "get_headers",
@@ -3469,9 +3990,12 @@ TOOLS = [
     },
     {
         "name": "read_attachment",
-        "description": "Extract an attachment's TEXT inline — PDFs via pypdf, plus "
-                       "text/csv/json/ics/eml. Use for invoices, decks, reports. "
-                       "Binary/image types must use save_attachment instead.",
+        "description": "Read an attachment inline. Text comes back as text: "
+                       "PDFs via pypdf, plus text/csv/json/ics/eml, for invoices, "
+                       "decks, reports. An image comes back as a viewable image, "
+                       "the only way to see a photo or a scan when the client "
+                       "cannot read local files. Other binary types must use "
+                       "save_attachment instead.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3479,28 +4003,11 @@ TOOLS = [
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "filename": {"type": "string", "description": "Which attachment (partial match OK). Optional if there is only one."},
+                "include_inline": {"type": "boolean", "description": "Also consider inline images and PGP keys, which are hidden by default. A filename no document matches is looked for among them anyway."},
             },
             "required": ["uid"],
         },
         "handler": tool_read_attachment,
-    },
-    {
-        "name": "view_attachment",
-        "description": "Look at an image attachment. Returns it as a viewable "
-                       "image, which is the only way to see a photo or a scan "
-                       "when the client cannot read local files. Images only, "
-                       "use read_attachment for text and PDFs.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uid": {"type": "string"},
-                "folder": {"type": "string", "description": "Default INBOX."},
-                "uidvalidity": {"type": "string"},
-                "filename": {"type": "string", "description": "Which image; partial match is fine."},
-            },
-            "required": ["uid"],
-        },
-        "handler": tool_view_attachment,
     },
     {
         "name": "save_attachment",
@@ -3553,63 +4060,12 @@ TOOLS = [
         "handler": tool_find_thread,
     },
     {
-        "name": "bulk_mark",
-        "description": "Mark many messages read/unread/starred in one pass. "
-                       "Far cheaper than one call per message.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
-            },
-            "required": ["uids", "action"],
-        },
-        "handler": tool_bulk_mark,
-    },
-    {
-        "name": "bulk_apply_label",
-        "description": "Apply one existing label to many messages. Messages stay "
-                       "where they are.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
-            },
-            "required": ["uids", "label"],
-        },
-        "handler": tool_bulk_apply_label,
-    },
-    {
-        "name": "bulk_move",
-        "description": "File or Trash many messages at once. GATED: preview with "
-                       "dry_run=true, show the user, then call with confirmed=true.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "to_folder": {"type": "string"},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["uids", "to_folder", "confirmed"],
-        },
-        "handler": tool_bulk_move,
-    },
-    {
         "name": "reply",
         "description": "Reply to one message with correct threading. Replies to "
                        "the Reply-To address when there is one, so alias mail stays "
-                       "masked. Pass draft=true to save it for review, or "
-                       "confirmed=true to send.",
+                       "masked. Pass all=true to reply to everyone, with your own "
+                       "addresses removed from Cc and duplicates dropped. Pass "
+                       "draft=true to save it for review, or confirmed=true to send.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3618,6 +4074,7 @@ TOOLS = [
                 "uid": {"type": "string"},
                 "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
+                "all": {"type": "boolean", "description": "Reply to everyone on the message, not just the sender. Default false."},
                 "body": {"type": "string", "description": "Your reply text. The original is quoted beneath unless quote=false."},
                 "subject": {"type": "string", "description": "Override the auto 'Re: ...' subject."},
                 "quote": {"type": "boolean", "description": "Quote the original beneath your reply. Default true."},
@@ -3628,30 +4085,6 @@ TOOLS = [
             "required": ["uid", "body"],
         },
         "handler": tool_reply,
-    },
-    {
-        "name": "reply_all",
-        "description": "Reply to everyone on a message, with your own addresses "
-                       "removed from Cc and duplicates dropped. Same draft and "
-                       "confirmation rules as reply.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "attach": {"type": "array", "items": {"type": "string"}, "description": "Files to attach, by path. Only from the allowed source directories."},
-                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
-                "folder": {"type": "string", "description": "Folder holding the message. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "body": {"type": "string", "description": "Your reply text. The original is quoted beneath unless quote=false."},
-                "subject": {"type": "string", "description": "Override the auto 'Re: ...' subject."},
-                "quote": {"type": "boolean", "description": "Quote the original beneath your reply. Default true."},
-                "from_address": {"type": "string", "description": "Must be on the sender allowlist. Left unset, alias mail automatically uses the alias-owner address."},
-                "draft": {"type": "boolean", "description": "Save to Drafts instead of sending. Needs no confirmation because nothing goes out."},
-                "confirmed": {"type": "boolean", "description": "Required to actually send. Not needed when draft=true."},
-            },
-            "required": ["uid", "body"],
-        },
-        "handler": tool_reply_all,
     },
     {
         "name": "create_draft",
@@ -3753,89 +4186,79 @@ TOOLS = [
     },
     {
         "name": "mark",
-        "description": "Mark a message read/unread or star/unstar.",
+        "description": "Mark one message (uid) or many in one pass (uids) "
+                       "read/unread or star/unstar.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Default INBOX."},
                 "action": {"type": "string", "enum": ["read", "unread", "star", "unstar"]},
             },
-            "required": ["uid", "action"],
+            "required": ["action"],
         },
         "handler": tool_mark,
     },
     {
         "name": "apply_label",
-        "description": "Tag a message with an existing label. The message stays "
-                       "where it is.",
+        "description": "Tag one message (uid) or many (uids) with an existing "
+                       "label. Messages stay where they are.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "label": {"type": "string", "description": "An existing label. On Proton the Labels/ prefix is optional; elsewhere this is an ordinary mailbox name."},
             },
-            "required": ["uid", "label"],
+            "required": ["label"],
         },
         "handler": tool_apply_label,
     },
     {
         "name": "remove_label",
-        "description": "Take a label off a message. The message itself stays "
-                       "where it is. GATED: removing a label ends in an expunge "
-                       "against the label mailbox, so confirm it or preview with "
-                       "dry_run=true first.",
+        "description": "Take a label off one message (uid) or many (uids). The "
+                       "messages stay where they are. GATED: removing a label "
+                       "ends in an expunge against the label mailbox, so confirm "
+                       "it or preview with dry_run=true first.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Folder the message lives in, default INBOX."},
                 "label": {"type": "string", "description": "The label to take off. On Proton the Labels/ prefix is optional."},
                 "confirmed": {"type": "boolean"},
             },
-            "required": ["uid", "label"],
+            "required": ["label"],
         },
         "handler": tool_remove_label,
     },
     {
-        "name": "bulk_remove_label",
-        "description": "Take one label off many messages at once. The messages "
-                       "stay where they are. GATED, like remove_label.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "uids": {"type": "array", "items": {"type": "string"}, "description": "Explicit message uids. No wildcards."},
-                "folder": {"type": "string", "description": "Folder the uids belong to. Default INBOX."},
-                "uidvalidity": {"type": "string", "description": "UIDVALIDITY for that folder; refuses on mismatch."},
-                "dry_run": {"type": "boolean", "description": "Preview which uids would be affected, change nothing."},
-                "label": {"type": "string", "description": "The label to take off. On Proton the Labels/ prefix is optional."},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["uids", "label"],
-        },
-        "handler": tool_bulk_remove_label,
-    },
-    {
         "name": "move_to_folder",
-        "description": "File a message: move it into another folder (e.g. "
-                       "'Folders/<name>', 'Archive', 'Trash').",
+        "description": "File one message (uid) or many (uids): move it into "
+                       "another folder (e.g. 'Folders/<name>', 'Archive', "
+                       "'Trash'). Many at once is GATED: preview with "
+                       "dry_run=true, show the user, then call with confirmed=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
-                "uid": {"type": "string"},
+                "uid": {"type": "string", "description": "One message. Pass this or uids."},
+                "uids": {"type": "array", "items": {"type": "string"}, "description": "Several messages, as explicit uids. No wildcards."},
                 "uidvalidity": {"type": "string", "description": "UIDVALIDITY reported alongside the uid. Pass it back so a mailbox resync cannot make this act on the wrong message."},
                 "folder": {"type": "string", "description": "Source folder, default INBOX."},
                 "to_folder": {"type": "string"},
+                "confirmed": {"type": "boolean", "description": "Required whenever uids is used."},
             },
-            "required": ["uid", "to_folder"],
+            "required": ["to_folder"],
         },
         "handler": tool_move_to_folder,
     },
@@ -3857,36 +4280,41 @@ TOOLS = [
         "handler": tool_create_mailbox,
     },
     {
+        "name": "rename_folder_or_label",
+        "description": "Rename a folder or label where it stands: a label stays "
+                       "a label and a folder keeps its parent. INBOX and the "
+                       "special mailboxes (Sent, Drafts, Trash, Spam, Archive, "
+                       "All Mail) are refused. GATED: confirm the old and new "
+                       "names with the user, then call with confirmed=true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+                "name": {"type": "string", "description": "The folder or label, exactly as list_folders shows it, e.g. 'Labels/Receipts'."},
+                "new_name": {"type": "string", "description": "The new name only, no 'Labels/' or 'Folders/' prefix."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["name", "new_name"],
+        },
+        "handler": tool_rename_mailbox,
+    },
+    {
         "name": "delete_label",
         "description": "Delete a label outright. Every message that carried it "
                        "stays exactly where it is and simply loses the tag — no "
                        "mail is deleted. Labels only; folders are where messages "
-                       "live and are not deletable here. GATED.",
+                       "live and are not deletable here. Pass label for one or "
+                       "labels for several. GATED.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "dry_run": {"type": "boolean", "description": "Preview it, including how many messages carry the label. Changes nothing, needs no confirmation."},
+                "dry_run": {"type": "boolean", "description": "Preview it, including how many messages carry each label. Changes nothing, needs no confirmation."},
                 "label": {"type": "string", "description": "The label to delete. On Proton the Labels/ prefix is optional."},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Several label names, instead of label."},
                 "confirmed": {"type": "boolean"},
             },
-            "required": ["label"],
         },
         "handler": tool_delete_label,
-    },
-    {
-        "name": "bulk_delete_labels",
-        "description": "Delete several labels in one pass. Messages keep their "
-                       "place and lose the tags. Labels only, GATED.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "dry_run": {"type": "boolean", "description": "Preview each one, including how many messages carry it. Changes nothing."},
-                "labels": {"type": "array", "items": {"type": "string"}, "description": "Label names. On Proton the Labels/ prefix is optional."},
-                "confirmed": {"type": "boolean"},
-            },
-            "required": ["labels"],
-        },
-        "handler": tool_bulk_delete_labels,
     },
     {
         "name": "send",
@@ -3936,19 +4364,20 @@ TOOLS = [
 
 MODE = _mode()
 _MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
+             "rename_folder_or_label",
              "move_to_folder", "apply_label", "remove_label", "mark",
-             "save_attachment", "bulk_mark", "bulk_apply_label",
-             "bulk_remove_label", "bulk_move", "reply", "reply_all",
+             "save_attachment", "reply",
              "update_draft", "delete_draft", "send_draft", "unsubscribe",
-             "delete_label", "bulk_delete_labels"}
+             "delete_label"}
 # _MUTATING is a statement about mail, and readonly has to take away more than
 # that. purge_attachments deletes files off the disk without ever touching the
 # mailbox, so it falls outside _MUTATING while plainly changing something, and
 # a mode called readonly cannot be the one that offers it.
 #
-# The polling pair stay. poll_folder and ack_folder write this server's own
-# checkpoint and nothing of yours, so removing them would cost the one workflow
-# readonly is for, watching a mailbox, to protect a file that is ours anyway.
+# poll_folder stays. It writes this server's own checkpoint, when it polls and
+# when it commits, and nothing of yours, so removing it would cost the one
+# workflow readonly is for, watching a mailbox, to protect a file that is ours
+# anyway.
 # That distinction is the whole reason this set is separate from _MUTATING.
 _READONLY_ALSO_REMOVES = {"purge_attachments"}
 if MODE == "readonly":
@@ -3963,50 +4392,41 @@ elif MODE == "organise":
 # ----------------------------------------------------------------------------
 # Not derived from _MUTATING, on purpose. That set is about mail: which tools
 # change the mailbox, and so which ones a mode should take away. readOnlyHint
-# asks a wider question, whether a tool changes anything at all, and three
-# tools fall the other side of that line. purge_attachments deletes files off
-# the disk and never touches the mailbox. poll_folder and ack_folder both write
-# the local checkpoint. Reusing _MUTATING here would have declared all three
-# read-only, which is the kind of wrong a reviewer takes at face value.
-_READ_ONLY = {"list_folders", "folder_status", "search_mail", "search_all_mail",
+# asks a wider question, whether a tool changes anything at all, and two tools
+# fall the other side of that line. purge_attachments deletes files off the
+# disk and never touches the mailbox. poll_folder writes the local checkpoint.
+# Reusing _MUTATING here would have declared both read-only, which is the kind
+# of wrong a reviewer takes at face value.
+_READ_ONLY = {"list_folders", "search_mail",
               "get_headers", "read_message", "list_attachments",
-              "read_attachment", "view_attachment", "find_thread"}
+              "read_attachment", "find_thread"}
 
 # Destroys something, or puts mail beyond recall.
-_DESTRUCTIVE = {"send", "forward", "reply", "reply_all", "send_draft",
+_DESTRUCTIVE = {"send", "forward", "reply", "send_draft",
                 "unsubscribe", "update_draft", "delete_draft", "delete_label",
-                "bulk_delete_labels", "purge_attachments"}
+                "purge_attachments"}
 
 # Running it twice lands in the same place as running it once.
-_IDEMPOTENT = {"ack_folder", "mark", "bulk_mark", "apply_label",
-               "bulk_apply_label", "remove_label", "bulk_remove_label",
-               "move_to_folder", "bulk_move", "create_folder_or_label",
-               "delete_label", "bulk_delete_labels", "delete_draft",
-               "update_draft", "save_attachment", "purge_attachments"}
+_IDEMPOTENT = {"mark", "apply_label", "remove_label",
+               "move_to_folder", "create_folder_or_label", "delete_label",
+               "delete_draft", "update_draft", "save_attachment",
+               "purge_attachments"}
 
 # Everything else reaches the mailbox, and a mailbox is whoever writes to it.
 _LOCAL_ONLY = {"purge_attachments"}
 
 TITLES = {
     "list_folders": "List folders and labels",
-    "folder_status": "Folder status",
     "poll_folder": "Poll for new mail",
-    "ack_folder": "Acknowledge poll checkpoint",
     "search_mail": "Search a folder",
-    "search_all_mail": "Search all mail",
     "get_headers": "Get message headers",
     "read_message": "Read a message",
     "list_attachments": "List attachments",
     "read_attachment": "Read an attachment",
-    "view_attachment": "View an image attachment",
     "save_attachment": "Save an attachment",
     "purge_attachments": "Delete saved attachments",
     "find_thread": "Find a thread",
-    "bulk_mark": "Mark messages in bulk",
-    "bulk_apply_label": "Apply a label in bulk",
-    "bulk_move": "Move messages in bulk",
     "reply": "Reply",
-    "reply_all": "Reply to all",
     "create_draft": "Create a draft",
     "update_draft": "Update a draft",
     "delete_draft": "Delete a draft",
@@ -4015,11 +4435,10 @@ TITLES = {
     "mark": "Mark a message",
     "apply_label": "Apply a label",
     "remove_label": "Remove a label",
-    "bulk_remove_label": "Remove a label in bulk",
     "move_to_folder": "Move to folder",
     "create_folder_or_label": "Create a folder or label",
+    "rename_folder_or_label": "Rename a folder or label",
     "delete_label": "Delete a label",
-    "bulk_delete_labels": "Delete labels in bulk",
     "send": "Send mail",
     "forward": "Forward",
 }

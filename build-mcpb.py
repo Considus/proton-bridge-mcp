@@ -94,8 +94,10 @@ def _vendor(libdir):
     if not VENDOR:
         return
     os.makedirs(libdir, exist_ok=True)
+    # --no-compile: newer pip writes a __pycache__ beside every module, built
+    # for the Python doing the build, which no user's Python would load.
     subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-                    "--target", libdir] + VENDOR, check=True)
+                    "--no-compile", "--target", libdir] + VENDOR, check=True)
     # pip leaves metadata that only inflates the bundle, so most of it goes.
     # The licences do not. pypdf is BSD-3-Clause, which requires its copyright
     # notice travel with any redistribution, and this bundle is a
@@ -108,6 +110,10 @@ def _vendor(libdir):
             shutil.rmtree(path, ignore_errors=True)
         elif entry == "__pycache__":
             shutil.rmtree(path, ignore_errors=True)
+    for root, dirs, _files in os.walk(libdir):
+        if "__pycache__" in dirs:
+            shutil.rmtree(os.path.join(root, "__pycache__"), ignore_errors=True)
+            dirs.remove("__pycache__")
 
     kept = sorted(f for f in os.listdir(libdir) if f.endswith(".LICENSE"))
     if len(kept) < len(VENDOR):
