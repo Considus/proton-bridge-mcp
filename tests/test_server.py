@@ -4347,6 +4347,204 @@ class DeleteLabelKeepsMail(unittest.TestCase):
         self.assertEqual(host.deleted, ["Labels/Old"])
 
 
+class RenameMailbox(unittest.TestCase):
+    """rename_folder_or_label renames one folder or label where it stands,
+    and never INBOX, a special mailbox, onto an existing name, or out from
+    under its parent."""
+
+    PROTON = [
+        ("\\HasNoChildren", "/", "INBOX"),
+        ("\\HasNoChildren \\Sent", "/", "Sent"),
+        ("\\HasNoChildren \\Drafts", "/", "Drafts"),
+        ("\\HasNoChildren \\Trash", "/", "Trash"),
+        ("\\HasNoChildren \\Junk", "/", "Spam"),
+        ("\\HasNoChildren \\Archive", "/", "Archive"),
+        ("\\HasNoChildren \\All", "/", "All Mail"),
+        ("\\HasNoChildren \\Flagged", "/", "Starred"),
+        ("\\Noselect \\HasChildren", "/", "Labels"),
+        ("\\HasNoChildren", "/", "Labels/Work"),
+        ("\\HasNoChildren", "/", "Labels/Home"),
+        ("\\Noselect \\HasChildren", "/", "Folders"),
+        ("\\HasChildren", "/", "Folders/Projects"),
+        ("\\HasNoChildren", "/", "Folders/Projects/2025"),
+    ]
+
+    class Host:
+        def __init__(self, boxes):
+            self.boxes = boxes
+            self.renamed = []
+            self.answer = "OK"
+        def list(self, *a):
+            return "OK", [('(%s) %s "%s"' % (
+                f, '"%s"' % d if d else "NIL", n)).encode()
+                for f, d, n in self.boxes]
+        def rename(self, old, new):
+            self.renamed.append((old, new))
+            return self.answer, [b"done"]
+        def logout(self):
+            pass
+
+    def setUp(self):
+        tmp = tempfile.mkdtemp()
+        self._saved = (server.imap_connect, server.AUDIT_LOG,
+                       server.STATE_FILE, server.ATTACH_DIR,
+                       dict(server.RATE_LIMITS))
+        server.AUDIT_LOG = os.path.join(tmp, "audit.log")
+        server.STATE_FILE = os.path.join(tmp, "state.json")
+        server.ATTACH_DIR = os.path.join(tmp, "attachments")
+        self.use(self.PROTON)
+
+    def tearDown(self):
+        (server.imap_connect, server.AUDIT_LOG, server.STATE_FILE,
+         server.ATTACH_DIR, limits) = self._saved
+        server.RATE_LIMITS.clear()
+        server.RATE_LIMITS.update(limits)
+
+    def use(self, boxes):
+        self.host = self.Host(boxes)
+        server.imap_connect = lambda: self.host
+        return self.host
+
+    def rename(self, name, new_name, **extra):
+        return server.tool_rename_mailbox(
+            dict({"name": name, "new_name": new_name, "confirmed": True},
+                 **extra))
+
+    def refused(self, name, new_name, why, **extra):
+        with self.assertRaises(server.ToolError) as cm:
+            self.rename(name, new_name, **extra)
+        self.assertIn(why, str(cm.exception))
+        self.assertEqual(self.host.renamed, [])
+
+    def test_a_label_stays_a_label(self):
+        out = self.rename("Labels/Work", "Clients")
+        self.assertEqual(self.host.renamed,
+                         [('"Labels/Work"', '"Labels/Clients"')])
+        self.assertIn("Renamed 'Labels/Work' to 'Labels/Clients'", out)
+
+    def test_a_folder_keeps_its_parent(self):
+        self.rename("Folders/Projects/2025", "Archive 2025")
+        self.assertEqual(self.host.renamed, [('"Folders/Projects/2025"',
+                                              '"Folders/Projects/Archive 2025"')])
+
+    def test_the_servers_own_delimiter_is_used(self):
+        self.use([("\\HasChildren", ".", "INBOX"),
+                  ("\\HasNoChildren", ".", "INBOX.Receipts")])
+        self.rename("INBOX.Receipts", "Bills")
+        self.assertEqual(self.host.renamed,
+                         [('"INBOX.Receipts"', '"INBOX.Bills"')])
+        self.host.renamed = []
+        self.refused("INBOX.Receipts", "Old.Bills", "hierarchy separator")
+
+    def test_without_confirmed_it_is_refused_before_connecting(self):
+        server.imap_connect = mock.Mock(side_effect=AssertionError("connected"))
+        for extra in ({"confirmed": False}, {"confirmed": None}):
+            with self.subTest(**extra):
+                with self.assertRaises(server.ToolError) as cm:
+                    self.rename("Labels/Work", "Clients", **extra)
+                self.assertIn("confirmed", str(cm.exception))
+
+    def test_a_preview_needs_no_confirmation_and_changes_nothing(self):
+        out = server.tool_rename_mailbox({"name": "Labels/Work",
+                                          "new_name": "Clients",
+                                          "dry_run": True})
+        self.assertIn("DRY RUN", out)
+        self.assertIn("Labels/Clients", out)
+        self.assertEqual(self.host.renamed, [])
+
+    def test_a_preview_runs_the_same_checks(self):
+        self.refused("Trash", "Bin", "server's own", dry_run=True,
+                     confirmed=False)
+
+    def test_inbox_and_special_mailboxes_are_refused(self):
+        for name in ("INBOX", "Sent", "Drafts", "Trash", "Spam", "Archive",
+                     "All Mail", "Starred"):
+            with self.subTest(name=name):
+                self.refused(name, "Other", "server's own")
+        self.use([("\\HasNoChildren", "/", "inbox")])
+        self.refused("inbox", "Other", "server's own")
+
+    def test_special_mailboxes_are_known_by_flag_and_by_name(self):
+        self.use([("\\HasNoChildren", "/", "INBOX"),
+                  ("\\HasNoChildren \\Trash", "/", "Bin"),
+                  ("\\HasNoChildren \\Archive", "/", "Kept"),
+                  ("\\HasNoChildren", "/", "Junk"),
+                  ("\\HasNoChildren", "/", "Sent Items"),
+                  ("\\HasNoChildren", "/", "Receipts")])
+        for name in ("Bin", "Kept", "Junk", "Sent Items"):
+            with self.subTest(name=name):
+                self.refused(name, "Other", "server's own")
+
+    def test_nothing_is_renamed_onto_a_special_name(self):
+        self.use([("\\HasNoChildren", "/", "INBOX"),
+                  ("\\HasNoChildren", "/", "Receipts")])
+        for new in ("Trash", "inbox", "Spam", "All Mail", "Drafts"):
+            with self.subTest(new_name=new):
+                self.refused("Receipts", new, "server's own")
+
+    def test_an_existing_target_is_refused(self):
+        self.refused("Labels/Work", "Home", "already exists")
+        self.refused("Labels/Work", "HOME", "already exists")
+
+    def test_names_the_name_checks_refuse(self):
+        for new in ("A/B", "back\\slash", 'quo"te', "new\r\nline", "tab\there"):
+            with self.subTest(new_name=new):
+                self.refused("Labels/Work", new, "may not contain")
+        self.refused("Labels/Work\r\nA1 DELETE INBOX", "Clients",
+                     "control character")
+        self.refused("Labels/Nope", "Clients", "No folder or label")
+        self.refused("Labels", "Tags", "namespace itself")
+        self.refused("Folders", "Places", "namespace itself")
+        for name, new in (("", "Clients"), ("Labels/Work", ""),
+                          ("  ", "Clients"), ("Labels/Work", "   ")):
+            with self.subTest(name=name, new_name=new):
+                self.refused(name, new, "required")
+
+    def test_the_same_name_is_a_no_op(self):
+        out = self.rename("Labels/Work", "Work")
+        self.assertIn("nothing to do", out)
+        self.assertEqual(self.host.renamed, [])
+
+    def test_a_failed_rename_is_an_error(self):
+        self.host.answer = "NO"
+        with self.assertRaises(server.ToolError) as cm:
+            self.rename("Labels/Work", "Clients")
+        self.assertIn("failed", str(cm.exception))
+
+    def _call(self, arguments):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                           "params": {"name": "rename_folder_or_label",
+                                      "arguments": arguments}})
+        return json.loads(out.getvalue())["result"]
+
+    def test_audited_and_rate_limited_as_a_write(self):
+        server.RATE_LIMITS["write"] = 1
+        args = {"name": "Labels/Work", "new_name": "Clients",
+                "confirmed": True}
+        res = self._call(args)
+        self.assertFalse(res.get("isError"), res)
+        with open(server.AUDIT_LOG) as f:
+            rec = [json.loads(l) for l in f if l.strip()][-1]
+        self.assertEqual((rec["tool"], rec["outcome"]),
+                         ("rename_folder_or_label", "ok"))
+        self.assertEqual(server._read_state()["rate"]["write"].__len__(), 1)
+        res = self._call(dict(args, name="Labels/Home"))
+        self.assertTrue(res.get("isError"))
+        self.assertIn("Rate limit", res["content"][0]["text"])
+        self.assertEqual(len(self.host.renamed), 1)
+
+    def test_annotations_and_modes(self):
+        ann = server._annotations("rename_folder_or_label")
+        self.assertFalse(ann["readOnlyHint"])
+        self.assertFalse(ann["destructiveHint"])
+        self.assertFalse(ann["idempotentHint"])
+        self.assertTrue(ann["openWorldHint"])
+        self.assertIn("rename_folder_or_label", server._MUTATING)
+        self.assertNotIn("rename_folder_or_label", server._SEND_TOOLS)
+
+
 class StatusEchoedName(unittest.TestCase):
     """A STATUS reply starts with the mailbox name the server echoes back, and
     that name can itself read 'MESSAGES 0' or 'UIDNEXT 999999'. The counters
@@ -5784,7 +5982,7 @@ class ModeFilters(unittest.TestCase):
                 self.assertEqual(set(tools) & server._SEND_TOOLS, set())
                 for gone in ("mark", "apply_label", "remove_label",
                              "move_to_folder", "delete_label", "reply",
-                             "purge_attachments"):
+                             "purge_attachments", "rename_folder_or_label"):
                     self.assertNotIn(gone, tools)
 
     def test_organise_exposes_no_send_tool(self):
@@ -5793,7 +5991,7 @@ class ModeFilters(unittest.TestCase):
         for gone in ("send", "forward", "reply", "send_draft", "unsubscribe"):
             self.assertNotIn(gone, tools)
         for kept in ("mark", "apply_label", "remove_label", "move_to_folder",
-                     "delete_label", "create_draft"):
+                     "delete_label", "create_draft", "rename_folder_or_label"):
             self.assertIn(kept, tools)
 
     def test_full_mode_offers_the_merged_tools(self):

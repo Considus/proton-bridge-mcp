@@ -598,6 +598,13 @@ _LIST_LINE = re.compile(
 
 def _parse_list_line(raw):
     """-> (flags_lower, name) for one LIST line, or None if it doesn't parse."""
+    parsed = _parse_list_entry(raw)
+    return None if parsed is None else (parsed[0], parsed[2])
+
+
+def _parse_list_entry(raw):
+    """-> (flags_lower, delimiter, name) for one LIST line, or None if it
+    doesn't parse. The delimiter is None when the server reports NIL."""
     if not isinstance(raw, (bytes, bytearray, str)):
         # None, or the tuple imaplib yields when a name arrives as a literal.
         # That needs UTF8=ACCEPT, which this server never enables, so it should
@@ -613,7 +620,10 @@ def _parse_list_line(raw):
         name = m.group("aname")
     else:
         name = name.replace('\\"', '"').replace("\\\\", "\\")
-    return m.group("flags").lower(), name
+    delim = m.group("delim")
+    if delim is not None:
+        delim = delim.replace('\\"', '"').replace("\\\\", "\\")
+    return m.group("flags").lower(), delim, name
 
 
 def _list_folders(conn):
@@ -3597,6 +3607,89 @@ def tool_create_mailbox(args):
             pass
 
 
+# Every RFC 6154 SPECIAL-USE flag. A mailbox carrying one is the server's own,
+# so renaming it is refused even where _SPECIAL has no entry for it.
+_SPECIAL_USE_FLAGS = (r"\all", r"\archive", r"\drafts", r"\flagged",
+                      r"\important", r"\junk", r"\sent", r"\trash")
+
+
+def _is_special_mailbox(name, flags=""):
+    """INBOX, or a mailbox the server marks as special or that _special_folder
+    would take for one by its name."""
+    return (name.upper() == "INBOX"
+            or any(f in flags.split() for f in _SPECIAL_USE_FLAGS)
+            or any(name.lower() in names for _flag, names in _SPECIAL.values()))
+
+
+def tool_rename_mailbox(args):
+    """Rename a folder or label where it stands. GATED, like creating one: it
+    changes mailbox structure, and the request may originate from untrusted
+    email content. The new name is a leaf, so a label stays a label and a
+    folder keeps its parent, and nothing here can move one mailbox under
+    another or onto a special one."""
+    if not args.get("dry_run") and not args.get("confirmed"):
+        raise ToolError("Refusing to rename a folder or label without "
+                        "confirmed=true. Show the user the old and new names, "
+                        "get a yes first.")
+    name = (args.get("name") or "").strip()
+    new_name = (args.get("new_name") or "").strip()
+    if not name or not new_name:
+        raise ToolError("'name' and 'new_name' are both required.")
+    _imap_str(name, "name")
+    if re.search(r'[/\\"\x00-\x1f]', new_name):
+        raise ToolError("new_name may not contain slashes, quotes or control "
+                        "characters. It is the new name only, without a "
+                        "'Labels/' or 'Folders/' prefix.")
+    conn = imap_connect()
+    try:
+        typ, data = conn.list()
+        boxes = {}
+        for raw in (data or []) if typ == "OK" else []:
+            parsed = _parse_list_entry(raw)
+            if parsed is not None:
+                boxes[parsed[2]] = parsed[:2]
+        if name not in boxes:
+            raise ToolError("No folder or label called '%s'. Run list_folders "
+                            "for exact names." % name)
+        flags, delim = boxes[name]
+        if _is_special_mailbox(name, flags):
+            raise ToolError(
+                "'%s' is one of the server's own mailboxes (INBOX, Sent, "
+                "Drafts, Trash, Spam, Archive, All Mail and the like). Mail "
+                "is filed there by name, so it is not renamed here." % name)
+        if name in ("Labels", "Folders") and any(
+                b.startswith(name + "/") for b in boxes):
+            raise ToolError("'%s' is the namespace itself, not a folder or "
+                            "label." % name)
+        if delim and delim in new_name:
+            raise ToolError("new_name may not contain '%s', the hierarchy "
+                            "separator on this server." % delim)
+        parent = name.rsplit(delim, 1)[0] + delim if delim and delim in name else ""
+        target = parent + new_name
+        if target == name:
+            return "'%s' already has that name, nothing to do." % name
+        if _is_special_mailbox(target):
+            raise ToolError("'%s' is the name of one of the server's own "
+                            "mailboxes, so nothing is renamed to it." % target)
+        clash = [b for b in boxes if b.lower() == target.lower() and b != name]
+        if clash:
+            raise ToolError("'%s' already exists. Nothing was renamed."
+                            % clash[0])
+        if args.get("dry_run"):
+            return _dry("rename '%s'" % name,
+                        ["to '%s'" % target,
+                         "the mail in it stays in it, under the new name"])
+        typ, resp = conn.rename(_folder_quote(name), _folder_quote(target))
+        if typ != "OK":
+            raise ToolError("Rename of '%s' failed: %s" % (name, resp))
+        return "Renamed '%s' to '%s'." % (name, target)
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
+
 # ----------------------------------------------------------------------------
 # Deleting a label
 #
@@ -4202,6 +4295,25 @@ TOOLS = [
         "handler": tool_create_mailbox,
     },
     {
+        "name": "rename_folder_or_label",
+        "description": "Rename a folder or label where it stands: a label stays "
+                       "a label and a folder keeps its parent. INBOX and the "
+                       "special mailboxes (Sent, Drafts, Trash, Spam, Archive, "
+                       "All Mail) are refused. GATED: confirm the old and new "
+                       "names with the user, then call with confirmed=true.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "dry_run": {"type": "boolean", "description": "Preview exactly what would happen and change nothing. Needs no confirmation."},
+                "name": {"type": "string", "description": "The folder or label, exactly as list_folders shows it, e.g. 'Labels/Receipts'."},
+                "new_name": {"type": "string", "description": "The new name only, no 'Labels/' or 'Folders/' prefix."},
+                "confirmed": {"type": "boolean"},
+            },
+            "required": ["name", "new_name"],
+        },
+        "handler": tool_rename_mailbox,
+    },
+    {
         "name": "delete_label",
         "description": "Delete a label outright. Every message that carried it "
                        "stays exactly where it is and simply loses the tag — no "
@@ -4267,6 +4379,7 @@ TOOLS = [
 
 MODE = _mode()
 _MUTATING = {"send", "forward", "create_draft", "create_folder_or_label",
+             "rename_folder_or_label",
              "move_to_folder", "apply_label", "remove_label", "mark",
              "save_attachment", "reply",
              "update_draft", "delete_draft", "send_draft", "unsubscribe",
@@ -4339,6 +4452,7 @@ TITLES = {
     "remove_label": "Remove a label",
     "move_to_folder": "Move to folder",
     "create_folder_or_label": "Create a folder or label",
+    "rename_folder_or_label": "Rename a folder or label",
     "delete_label": "Delete a label",
     "send": "Send mail",
     "forward": "Forward",

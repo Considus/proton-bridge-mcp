@@ -143,6 +143,10 @@
       "description": "Create a new label or folder. GATED: it changes your folder and label structure, so confirm the exact name and type with the user, then call with confirmed=true."
     },
     {
+      "name": "rename_folder_or_label",
+      "description": "Rename a folder or label where it stands: a label stays a label and a folder keeps its parent. INBOX and the special mailboxes (Sent, Drafts, Trash, Spam, Archive, All Mail) are refused. GATED: confirm the old and new names with the user, then call with confirmed=true."
+    },
+    {
       "name": "delete_label",
       "description": "Delete a label outright. Every message that carried it stays exactly where it is and simply loses the tag — no mail is deleted. Labels only; folders are where messages live and are not deletable here. Pass label for one or labels for several. GATED."
     },
