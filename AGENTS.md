@@ -34,10 +34,10 @@ Capture the **before** while reproducing and the **after** once it works, usuall
    git fetch origin
    git config --unset core.hooksPath || true
    d="$(git rev-parse --git-common-dir)/hooks"; mkdir -p "$d"
-   for h in pre-commit commit-msg; do git show "origin/main:hooks/$h" > "$d/$h" && chmod 755 "$d/$h"; done
+   for h in pre-commit commit-msg; do git show "origin/main:hooks/$h" > "$d/$h.tmp" && chmod 755 "$d/$h.tmp" && mv "$d/$h.tmp" "$d/$h" || { rm -f "$d/$h.tmp"; echo "not copied: $h"; }; done
    ```
 
-   Never set `core.hooksPath` to `hooks`. Git would then run the hook files of whichever branch is checked out, so checking out an outsider's PR would run their code on your machine. The unset line removes that setting from a clone that followed the old instruction. While it is set, git ignores its own hooks folder. If `git config --show-origin --get core.hooksPath` still prints a value afterwards, it was set globally: remove it with `git config --global --unset core.hooksPath`. Copy again after a reviewed change to `hooks/` lands on `main`.
+   Each hook goes to a temporary file first, so a failed copy keeps the old hook instead of leaving an empty one that lets every commit through. Never set `core.hooksPath` to `hooks`. Git would then run the hook files of whichever branch is checked out, so checking out an outsider's PR would run their code on your machine. The unset line removes that setting from a clone that followed the old instruction. While it is set, git ignores its own hooks folder. If `git config --show-origin --get core.hooksPath` still prints a value afterwards, it was set globally: remove it with `git config --global --unset core.hooksPath`. Copy again after a reviewed change to `hooks/` lands on `main`.
 2. Check nobody is already on the work, then branch from `origin/main` by name:
 
    ```bash
