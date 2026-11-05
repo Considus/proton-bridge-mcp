@@ -10,4 +10,5 @@ settings.json
 audit.log*
 state.json
 state.json.lock
+STOP
 dist/

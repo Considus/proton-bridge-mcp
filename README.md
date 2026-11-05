@@ -300,6 +300,12 @@ A batch is only ever explicit numbered messages, never "everything in this folde
 
 Sending is capped at 30 recipients an hour and organising at 2000, both adjustable. The audit log tells you what happened after the fact, a limit stops it happening two hundred more times. Sends are capped far tighter than filing on purpose, since moving a thousand messages is tidying up and sending a thousand is an incident.
 
+### Stopping a run that's already going
+
+Put a file called `STOP` in the server's folder and every send is refused from the next one on, previews included. Nothing else changes, it can still read, file and draft, and there's no restart, so stopping one run doesn't mean pulling the whole server. Delete the file and sending comes back. It can be empty, and `PROTON_STOP_FILE` moves it somewhere easier to reach if you'd rather.
+
+None of this server's tools can make or remove that file. An assistant that also has a shell on your computer could, though, so it's the quickest brake rather than the last one.
+
 ### Attachments are files, not code
 
 Nothing is ever executed. Saved files are confined to the `attachments` directory, written owner-only and never executable, and they delete themselves after 15 minutes. One thing to be aware of though, files written this way don't carry the quarantine flag your browser or mail client would add, so your operating system won't warn you about them. Don't open executables that arrived by email.
