@@ -35,6 +35,7 @@ Configuration (environment variables):
     PROTON_SETTINGS_FILE default ./settings.json (written by setup.py)
     PROTON_KEYCHAIN_SVC  default proton-bridge-imap
     PROTON_ATTACH_DIR    default ./attachments
+    PROTON_STOP_FILE     default ./STOP, while anything is there no mail is sent
 """
 
 import base64
@@ -133,6 +134,10 @@ RATE_LIMITS = {"send": int(_cfg("PROTON_RATE_SEND_PER_HOUR", "30")),
                "write": int(_cfg("PROTON_RATE_WRITE_PER_HOUR", "2000"))}
 ATTACH_DIR = _cfg("PROTON_ATTACH_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "attachments")
+# Anything at this path stops every send until it is removed. It is looked for
+# on each send, so it works mid-run with no restart.
+STOP_FILE = _cfg("PROTON_STOP_FILE") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "STOP")
 
 SERVER_NAME = "proton-mail"
 SERVER_VERSION = "2.0.0"
@@ -375,6 +380,16 @@ def _replace_state(state):
 
 
 _SEND_TOOLS = {"send", "forward", "reply", "send_draft", "unsubscribe"}
+
+
+def _check_stop():
+    """Refuse to send while the stop file exists. No tool here creates or
+    removes it, so a run that has gone wrong cannot talk its way past it
+    through this server."""
+    if os.path.lexists(STOP_FILE):
+        raise ToolError(
+            "Sending is stopped: %s exists. Nothing was sent. Delete that file "
+            "to allow sending again." % STOP_FILE)
 
 
 def _rate_check(tool, n=1):
@@ -1614,6 +1629,7 @@ def _do_reply(args, reply_all):
         note = "\n  (%s, so it is from your own address)" % _UNPROVEN_ALIAS
     if args.get("dry_run"):
         if not as_draft:
+            _check_stop()
             _check_recipients(*_envelope_recipients(reply))
         _taint_text(quoted)  # the preview shows the inbound body to the model
         return _dry("%s uid %s" % ("save a draft reply to" if as_draft
@@ -1888,6 +1904,7 @@ def tool_send_draft(args):
         _check_sender(sender)
     _check_recipients(to, cc, bcc)
     if args.get("dry_run"):
+        _check_stop()
         _check_recipients(*_envelope_recipients(msg))
         return _dry("send draft uid %s" % uid,
                     _taint_preview(_preview(msg), msg))
@@ -2035,6 +2052,7 @@ def tool_unsubscribe(args):
     _check_recipients(target)
     out = _new_message(target, "", subject, "Please unsubscribe this address.")
     if args.get("dry_run"):
+        _check_stop()
         _check_recipients(*_envelope_recipients(out))
         return _dry("send an unsubscribe for uid %s" % uid,
                     _preview(out) + (["", "Caveat: " + advice[-1]] if aliased else []))
@@ -2398,6 +2416,7 @@ def _refused_note(refused):
 def _smtp_send(msg):
     """Send msg. Returns the recipients the server refused, which smtplib
     reports only when it took the message for at least one other."""
+    _check_stop()
     mode = _security_mode("PROTON_SMTP_SECURITY", SMTP_PORT)
     ctx = _tls_context(SMTP_HOST)
     smtp_user, smtp_pw = smtp_credentials()
@@ -2458,6 +2477,7 @@ def tool_send(args):
                        references=args.get("references"),
                        from_address=from_address, attachments=files)
     if args.get("dry_run"):
+        _check_stop()
         _check_recipients(*_envelope_recipients(msg))
         return _dry("send this message", _preview(msg, files=files))
     refused = _smtp_send(msg)
@@ -2506,6 +2526,7 @@ def tool_forward(args):
     fwd.add_attachment(original.as_bytes(), maintype="message",
                        subtype="rfc822", filename="original.eml")
     if args.get("dry_run"):
+        _check_stop()
         _check_recipients(*_envelope_recipients(fwd))
         return _dry("forward uid %s" % uid, _taint_preview(_preview(fwd), fwd))
     refused = _smtp_send(fwd)

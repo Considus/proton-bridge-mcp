@@ -6694,5 +6694,80 @@ class SenderWrittenTextIsTainted(unittest.TestCase):
         self.assertEqual(self.sent, [])
 
 
+
+class StopFile(unittest.TestCase):
+    """A file named STOP refuses every send at once, without a restart."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._saved = {k: getattr(server, k) for k in (
+            "USER", "ALIAS_FROM", "STATE_FILE", "STOP_FILE")}
+        server.USER, server.ALIAS_FROM = "owner@example.test", ""
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.STOP_FILE = os.path.join(self.tmp, "STOP")
+        tainted = set(server._TAINTED)
+        server._TAINTED.clear()
+        self.addCleanup(server._TAINTED.update, tainted)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+
+    def _stop(self):
+        open(server.STOP_FILE, "w").close()
+
+    def _call(self, name, arguments):
+        req = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+               "params": {"name": name, "arguments": arguments}}
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            server.handle(req)
+        return json.loads(out.getvalue())["result"]
+
+    def _msg(self):
+        msg = EmailMessage()
+        msg["From"] = "owner@example.test"
+        msg["To"] = "friend@example.test"
+        msg["Subject"] = "s"
+        msg.set_content("b")
+        return msg
+
+    def test_stop_file_refuses_before_connecting(self):
+        self._stop()
+        with mock.patch("smtplib.SMTP") as plain, \
+                mock.patch("smtplib.SMTP_SSL") as tls, \
+                mock.patch.object(server, "smtp_credentials") as creds:
+            with self.assertRaises(server.ToolError) as cm:
+                server._smtp_send(self._msg())
+        self.assertIn("STOP", str(cm.exception))
+        plain.assert_not_called()
+        tls.assert_not_called()
+        creds.assert_not_called()
+
+    def test_preview_reports_the_stop(self):
+        args = {"to": "friend@example.test", "subject": "s", "body": "b",
+                "dry_run": True}
+        self.assertFalse(self._call("send", args).get("isError"))
+        self._stop()
+        res = self._call("send", args)
+        self.assertTrue(res.get("isError"))
+        self.assertIn("STOP", res["content"][0]["text"])
+
+    def test_deleting_the_file_resumes_sending(self):
+        self._stop()
+        os.remove(server.STOP_FILE)
+        server._check_stop()  # no error once the file is gone
+
+    def test_a_stop_directory_counts_too(self):
+        os.mkdir(server.STOP_FILE)
+        with self.assertRaises(server.ToolError):
+            server._check_stop()
+
+
 if __name__ == "__main__":
     unittest.main()
