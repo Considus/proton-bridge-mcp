@@ -6763,6 +6763,15 @@ class StopFile(unittest.TestCase):
         os.remove(server.STOP_FILE)
         server._check_stop()  # no error once the file is gone
 
+    def test_refused_send_uses_no_rate_limit_slot(self):
+        self._stop()
+        res = self._call("send", {"to": "friend@example.test", "subject": "s",
+                                  "body": "b", "confirmed": True})
+        self.assertTrue(res.get("isError"))
+        self.assertIn("STOP", res["content"][0]["text"])
+        rate = (server._read_state().get("rate") or {}).get("send", [])
+        self.assertEqual(rate, [], "a refused send used a rate-limit slot")
+
     def test_a_stop_directory_counts_too(self):
         os.mkdir(server.STOP_FILE)
         with self.assertRaises(server.ToolError):

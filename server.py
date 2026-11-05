@@ -4577,7 +4577,10 @@ def handle(req):
         audited = name in _MUTATING
         try:
             args = _check_arg_types(name, args)
-            if audited and not args.get("dry_run"):
+            # While sending is stopped, a send tool is refused further in
+            # and must not use up the hourly budget on the way.
+            if (audited and not args.get("dry_run")
+                    and not (name in _SEND_TOOLS and os.path.lexists(STOP_FILE))):
                 _rate_check(name)
             out = handler(args)
             content = out if isinstance(out, list) else [
