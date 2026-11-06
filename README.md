@@ -212,11 +212,73 @@ git pull
 
 ## Where things live
 
-Passwords sit in your operating system's credential store, Keychain, Credential Manager or Secret Service depending on what you're running. Everything else goes in `settings.json` next to the server, owner-readable only, no secrets in it. Environment variables override the file if you'd rather configure it that way, and `.env.example` covers the ones most people need. The rest are named where they come up in this README.
+Passwords sit in your operating system's credential store, Keychain, Credential Manager or Secret Service depending on what you're running. Everything else goes in `settings.json` next to the server, owner-readable only, no secrets in it. Environment variables override the file if you'd rather configure it that way, and `.env.example` covers the ones most people need. [Every setting](#every-setting) has the full list.
 
 Using it writes three more files, all next to the server and all owner-readable only. `state.json` keeps polling cursors, rate counters, the addresses refused as recipients and a list of the attachments it saved, with an empty `state.json.lock` beside it, `audit.log` records everything that changed something, and saved attachments land in `attachments/` until the TTL sweeps them. Each one has an override, `PROTON_STATE_FILE`, `PROTON_AUDIT_LOG` and `PROTON_ATTACH_DIR`, so none of them are stuck where they land by default.
 
 `audit.log` is the one worth a thought about where it sits. It keeps recipient addresses, subject lines and folder names in the clear, message bodies never, so over time it accumulates a record of who you write to without ever becoming a second copy of your mail. It rotates at 5MB, nothing expires by age, and rotating never drops a record less than a week old, so the record runs as far back as your last 5MB of activity or the last week, whichever is further. That makes the folder you cloned into a question rather than a given. If it gets backed up, synced or indexed, the metadata goes with it, and pointing `PROTON_AUDIT_LOG` at somewhere outside that tree keeps the record on the machine that made it. On macOS a directory under `~/Library/Application Support/` that you exclude from Time Machine does the job, and excluding the directory rather than the file matters, because the rotated `audit.log.1` is a new file that needs to inherit the exclusion.
+
+### Every setting
+
+All of these work as environment variables, and most can sit in `settings.json` too, with the environment winning where both are set. The few marked "env only" are read from the environment and nowhere else, so put those in your MCP client's `env` block.
+
+**Connecting to Bridge**
+
+| Setting | Default | What it does |
+|---|---|---|
+| `PROTON_USER` | none, it's required | The Bridge username, the address Bridge shows you |
+| `PROTON_BRIDGE_PASSWORD` | none | The Bridge password, if you'd rather not use the credential store |
+| `PROTON_KEYCHAIN_SVC` | `proton-bridge-imap` | The name the password is saved under in the credential store |
+| `PROTON_IMAP_HOST` | `127.0.0.1` | Where to read mail from |
+| `PROTON_IMAP_PORT` | `1143` | Bridge can pick a different one, so check Mailbox details |
+| `PROTON_IMAP_SECURITY` | `auto` | `auto`, `ssl` or `starttls` |
+| `PROTON_IMAP_TIMEOUT_S` | `60` | Seconds one IMAP read or write can wait before it gives up |
+| `PROTON_SMTP_HOST` | `127.0.0.1` | Where to send mail through |
+| `PROTON_SMTP_PORT` | `1025` | Bridge can pick a different one here too |
+| `PROTON_SMTP_SECURITY` | `auto` | `auto`, `ssl` or `starttls` |
+| `PROTON_SMTP_USER` | the same as `PROTON_USER` | Only needed if sending ever uses a different login |
+| `PROTON_SMTP_PASSWORD` | none | A separate sending password. Without one, the reading password is used when the user is the same |
+| `PROTON_SMTP_KEYCHAIN_SVC` | `proton-bridge-smtp` | The name a separate sending password is saved under |
+| `PROTON_TLS_INSECURE_HOSTS` | none | Comma-separated remote hosts excused from certificate checks |
+| `PROTON_AUTHSERV_ID` | `mail.protonmail.ch` | The server whose SPF, DKIM and DMARC verdicts `get_headers` trusts, comma-separated if there's more than one |
+
+**What it's allowed to do**
+
+| Setting | Default | What it does |
+|---|---|---|
+| `PROTON_MODE` | `full` | `full`, `organise` or `readonly` |
+| `PROTON_READONLY` | off | `1`, `true`, `yes` or `on` forces `readonly`, whatever `PROTON_MODE` says |
+| `PROTON_ALIAS_FROM` | none | The address replies go out from when you answer through a SimpleLogin reverse-alias |
+| `PROTON_ALLOWED_SENDERS` | your own addresses | Extra From addresses, comma-separated |
+| `PROTON_ALLOWED_RECIPIENTS` | none | Addresses allowed as recipients even though they only turned up inside a message, comma-separated. Env only |
+| `PROTON_ATTACH_SOURCE_DIRS` | the attachments folder | Folders a file can be attached from, comma-separated |
+
+**Limits**
+
+| Setting | Default | What it does |
+|---|---|---|
+| `PROTON_RATE_SEND_PER_HOUR` | `30` | Sends in any hour |
+| `PROTON_RATE_WRITE_PER_HOUR` | `2000` | Every other change in any hour |
+| `PROTON_MAX_BULK` | `50` | Messages one bulk call can act on |
+| `PROTON_MAX_FETCH_MB` | `2` | The largest image `read_attachment` shows inline |
+| `PROTON_MAX_ATTACH_MB` | `25` | The largest other attachment `read_attachment` or `save_attachment` will take. Env only |
+| `PROTON_MAX_PDF_PAGES` | `200` | PDF pages read as text. Env only |
+| `PROTON_PDF_TIMEOUT_S` | `10` | Seconds reading one PDF can take. Env only |
+| `PROTON_MAX_OUTGOING_MB` | `20` | Total size of the files attached to one message you send |
+| `PROTON_MAX_OUTGOING_FILES` | `10` | Files attached to one message you send |
+| `PROTON_ATTACH_TTL_SECONDS` | `900` | How long a saved attachment stays before it's swept, unless it was saved with `persist`. Env only |
+
+**Files**
+
+| Setting | Default | What it does |
+|---|---|---|
+| `PROTON_SETTINGS_FILE` | `settings.json` next to the server | Where the settings file is. Env only, as it can't very well be in itself |
+| `PROTON_STATE_FILE` | `state.json` next to the server | Polling cursors, rate counters and refused addresses |
+| `PROTON_ATTACH_DIR` | `attachments/` next to the server | Where saved attachments go |
+| `PROTON_STOP_FILE` | `STOP` next to the server | While anything is there, nothing is sent |
+| `PROTON_AUDIT_LOG` | `audit.log` next to the server | The audit log |
+| `PROTON_AUDIT` | `1` | `0` turns the audit log off |
+| `PROTON_AUDIT_MAX_MB` | `5` | The size the audit log rotates at |
 
 ## Security
 
