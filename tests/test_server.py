@@ -6772,6 +6772,27 @@ class StopFile(unittest.TestCase):
         rate = (server._read_state().get("rate") or {}).get("send", [])
         self.assertEqual(rate, [], "a refused send used a rate-limit slot")
 
+    def test_an_ending_or_lower_case_still_stops(self):
+        # TextEdit saves "STOP" as STOP.rtf or STOP.txt and hides the ending.
+        for name in ("STOP.txt", "STOP.rtf", "stop", "Stop.TXT"):
+            path = os.path.join(os.path.dirname(server.STOP_FILE), name)
+            open(path, "w").close()
+            try:
+                with self.assertRaises(server.ToolError, msg=name) as cm:
+                    server._check_stop()
+                self.assertIn(name, str(cm.exception))
+            finally:
+                os.remove(path)
+
+    def test_a_longer_name_does_not_stop(self):
+        for name in ("STOPPED.txt", "nonstop", "STOP-notes.txt"):
+            path = os.path.join(os.path.dirname(server.STOP_FILE), name)
+            open(path, "w").close()
+            try:
+                server._check_stop()
+            finally:
+                os.remove(path)
+
     def test_a_stop_directory_counts_too(self):
         os.mkdir(server.STOP_FILE)
         with self.assertRaises(server.ToolError):

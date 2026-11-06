@@ -134,7 +134,8 @@ RATE_LIMITS = {"send": int(_cfg("PROTON_RATE_SEND_PER_HOUR", "30")),
                "write": int(_cfg("PROTON_RATE_WRITE_PER_HOUR", "2000"))}
 ATTACH_DIR = _cfg("PROTON_ATTACH_DIR") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "attachments")
-# Anything at this path stops every send until it is removed. It is looked for
+# Anything at this path, or with this name plus an ending (STOP.txt), stops
+# every send until it is removed. It is looked for
 # on each send, so it works mid-run with no restart.
 STOP_FILE = _cfg("PROTON_STOP_FILE") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "STOP")
@@ -382,14 +383,34 @@ def _replace_state(state):
 _SEND_TOOLS = {"send", "forward", "reply", "send_draft", "unsubscribe"}
 
 
+def _stop_path():
+    """The stop file if one is there, else None. Any case and any ending
+    count, because TextEdit saves "STOP" as STOP.rtf or STOP.txt and hides
+    the ending."""
+    if os.path.lexists(STOP_FILE):
+        return STOP_FILE
+    folder, base = os.path.split(STOP_FILE)
+    base = base.lower()
+    try:
+        names = os.listdir(folder or ".")
+    except OSError:
+        return None
+    for name in names:
+        low = name.lower()
+        if low == base or low.startswith(base + "."):
+            return os.path.join(folder, name)
+    return None
+
+
 def _check_stop():
     """Refuse to send while the stop file exists. No tool here creates or
     removes it, so a run that has gone wrong cannot talk its way past it
     through this server."""
-    if os.path.lexists(STOP_FILE):
+    found = _stop_path()
+    if found:
         raise ToolError(
             "Sending is stopped: %s exists. Nothing was sent. Delete that file "
-            "to allow sending again." % STOP_FILE)
+            "to allow sending again." % found)
 
 
 def _rate_check(tool, n=1):
@@ -4580,7 +4601,7 @@ def handle(req):
             # While sending is stopped, a send tool is refused further in
             # and must not use up the hourly budget on the way.
             if (audited and not args.get("dry_run")
-                    and not (name in _SEND_TOOLS and os.path.lexists(STOP_FILE))):
+                    and not (name in _SEND_TOOLS and _stop_path())):
                 _rate_check(name)
             out = handler(args)
             content = out if isinstance(out, list) else [
