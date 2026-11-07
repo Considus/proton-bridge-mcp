@@ -402,10 +402,27 @@ def _stop_path():
     return None
 
 
+# Set by the stop_sending prompt. A prompt is something the person runs (a
+# slash command in Claude Code), never the model, and no tool reads or clears
+# this, so it lasts until this server process ends. Each session starts its
+# own process over stdio, so it stops only the session it was typed in.
+_SESSION_STOPPED = False
+
+
+def _sending_stopped():
+    """True while either brake is on: this session's stop_sending, or the
+    stop file."""
+    return _SESSION_STOPPED or bool(_stop_path())
+
+
 def _check_stop():
-    """Refuse to send while the stop file exists. No tool here creates or
-    removes it, so a run that has gone wrong cannot talk its way past it
-    through this server."""
+    """Refuse to send while stop_sending has been run in this session or the
+    stop file exists. No tool here sets or clears either, so a run that has
+    gone wrong cannot talk its way past them through this server."""
+    if _SESSION_STOPPED:
+        raise ToolError(
+            "Sending is stopped for this session: stop_sending was run. "
+            "Nothing was sent. Start a new session to send again.")
     found = _stop_path()
     if found:
         raise ToolError(
@@ -4513,6 +4530,39 @@ TOOL_DEFS = [{"name": t["name"],
              for t in TOOLS]
 
 
+# Prompts are run by the person, not the model: Claude Code shows each one as a
+# slash command (/mcp__<server>__stop_sending) and asks the server for it the
+# moment it is typed. That request is the switch, so it never depends on the
+# model reading or obeying the text that comes back.
+PROMPT_DEFS = [{
+    "name": "stop_sending",
+    "title": "Stop sending",
+    "description": ("Stops this session sending any more mail, previews "
+                    "included. Reading, filing and drafting carry on. Lasts "
+                    "until the session ends, and only a new session can "
+                    "send again."),
+}]
+
+
+def _get_prompt(id_, name):
+    global _SESSION_STOPPED
+    if name != "stop_sending":
+        _error(id_, -32602, "Unknown prompt: %s" % name)
+        return
+    _SESSION_STOPPED = True
+    _audit("stop_sending", {}, "ok", "sending stopped for this session")
+    _result(id_, {
+        "description": "Sending stopped for this session",
+        "messages": [{"role": "user", "content": {"type": "text", "text": (
+            "I've stopped sending for this session with stop_sending. The "
+            "mail server will refuse every send, forward, reply, "
+            "unsubscribe and send preview from now on, and none of its tools "
+            "can undo that. Don't try to send by another route. Finish or "
+            "pause what you were doing, keep anything unsent as a draft, "
+            "and tell me where you stopped.")}}],
+    })
+
+
 # ----------------------------------------------------------------------------
 # JSON-RPC / MCP plumbing
 # ----------------------------------------------------------------------------
@@ -4573,7 +4623,7 @@ def handle(req):
         proto = params.get("protocolVersion", DEFAULT_PROTOCOL)
         _result(id_, {
             "protocolVersion": proto,
-            "capabilities": {"tools": {}},
+            "capabilities": {"tools": {}, "prompts": {}},
             "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
         })
     elif method == "notifications/initialized":
@@ -4582,6 +4632,10 @@ def handle(req):
         _result(id_, {})
     elif method == "tools/list":
         _result(id_, {"tools": TOOL_DEFS})
+    elif method == "prompts/list":
+        _result(id_, {"prompts": PROMPT_DEFS})
+    elif method == "prompts/get":
+        _get_prompt(id_, params.get("name"))
     elif method == "tools/call":
         name = params.get("name")
         args = params.get("arguments") or {}
@@ -4601,7 +4655,7 @@ def handle(req):
             # While sending is stopped, a send tool is refused further in
             # and must not use up the hourly budget on the way.
             if (audited and not args.get("dry_run")
-                    and not (name in _SEND_TOOLS and _stop_path())):
+                    and not (name in _SEND_TOOLS and _sending_stopped())):
                 _rate_check(name)
             out = handler(args)
             content = out if isinstance(out, list) else [

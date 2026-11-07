@@ -6799,5 +6799,114 @@ class StopFile(unittest.TestCase):
             server._check_stop()
 
 
+class StopSendingCommand(unittest.TestCase):
+    """The stop_sending prompt, which a person types as a slash command,
+    refuses every send for the rest of this server process. The model has no
+    tool that reaches it."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self._saved = {k: getattr(server, k) for k in (
+            "USER", "ALIAS_FROM", "STATE_FILE", "STOP_FILE", "AUDIT_LOG",
+            "AUDIT_ENABLED", "_SESSION_STOPPED")}
+        server.USER, server.ALIAS_FROM = "owner@example.test", ""
+        server.STATE_FILE = os.path.join(self.tmp, "state.json")
+        server.STOP_FILE = os.path.join(self.tmp, "STOP")
+        server.AUDIT_LOG = os.path.join(self.tmp, "audit.log")
+        server.AUDIT_ENABLED = True
+        server._SESSION_STOPPED = False
+        tainted = set(server._TAINTED)
+        server._TAINTED.clear()
+        self.addCleanup(server._TAINTED.update, tainted)
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("PROTON_ALLOWED_RECIPIENTS", None)
+        os.environ.pop("PROTON_ALLOWED_SENDERS", None)
+
+    def tearDown(self):
+        for k, v in self._saved.items():
+            setattr(server, k, v)
+
+    def _rpc(self, method, params=None):
+        req = {"jsonrpc": "2.0", "id": 1, "method": method,
+               "params": params or {}}
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            server.handle(req)
+        return json.loads(out.getvalue())
+
+    def _send_args(self, **extra):
+        args = {"to": "friend@example.test", "subject": "s", "body": "b"}
+        args.update(extra)
+        return args
+
+    def _call(self, name, arguments):
+        return self._rpc("tools/call",
+                         {"name": name, "arguments": arguments})["result"]
+
+    def test_initialize_offers_prompts(self):
+        caps = self._rpc("initialize", {})["result"]["capabilities"]
+        self.assertIn("prompts", caps)
+
+    def test_prompt_is_listed_with_tool_style_name(self):
+        prompts = self._rpc("prompts/list")["result"]["prompts"]
+        self.assertEqual([p["name"] for p in prompts], ["stop_sending"])
+        self.assertTrue(prompts[0].get("description"))
+
+    def test_running_it_refuses_the_next_send(self):
+        self.assertFalse(self._call("send", self._send_args(dry_run=True))
+                         .get("isError"))
+        got = self._rpc("prompts/get", {"name": "stop_sending"})["result"]
+        self.assertIn("stopped", got["messages"][0]["content"]["text"].lower())
+        res = self._call("send", self._send_args(dry_run=True))
+        self.assertTrue(res.get("isError"))
+        self.assertIn("stop_sending", res["content"][0]["text"])
+
+    def test_refused_before_connecting(self):
+        self._rpc("prompts/get", {"name": "stop_sending"})
+        msg = EmailMessage()
+        msg["From"] = "owner@example.test"
+        msg["To"] = "friend@example.test"
+        msg["Subject"] = "s"
+        msg.set_content("b")
+        with mock.patch("smtplib.SMTP") as plain, \
+                mock.patch("smtplib.SMTP_SSL") as tls, \
+                mock.patch.object(server, "smtp_credentials") as creds:
+            with self.assertRaises(server.ToolError):
+                server._smtp_send(msg)
+        plain.assert_not_called()
+        tls.assert_not_called()
+        creds.assert_not_called()
+
+    def test_refused_send_uses_no_rate_limit_slot(self):
+        self._rpc("prompts/get", {"name": "stop_sending"})
+        res = self._call("send", self._send_args(confirmed=True))
+        self.assertTrue(res.get("isError"))
+        rate = (server._read_state().get("rate") or {}).get("send", [])
+        self.assertEqual(rate, [], "a refused send used a rate-limit slot")
+
+    def test_no_tool_can_reach_it(self):
+        # The model only sees tools. None of them may share the prompt's
+        # name, and calling that name as a tool must not stop or resume.
+        self.assertNotIn("stop_sending", server.HANDLERS)
+        res = self._rpc("tools/call", {"name": "stop_sending",
+                                       "arguments": {}})
+        self.assertIn("error", res)
+        self.assertFalse(server._SESSION_STOPPED)
+
+    def test_unknown_prompt_is_an_error_and_does_not_stop(self):
+        res = self._rpc("prompts/get", {"name": "resume_sending"})
+        self.assertEqual(res["error"]["code"], -32602)
+        self.assertFalse(server._SESSION_STOPPED)
+
+    def test_the_stop_is_written_to_the_audit_log(self):
+        self._rpc("prompts/get", {"name": "stop_sending"})
+        with open(server.AUDIT_LOG) as f:
+            records = [json.loads(line) for line in f]
+        self.assertEqual(records[-1]["tool"], "stop_sending")
+        self.assertEqual(records[-1]["outcome"], "ok")
+
+
 if __name__ == "__main__":
     unittest.main()
