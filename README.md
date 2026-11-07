@@ -368,6 +368,12 @@ Put a file called `STOP` in the server's folder and every send is refused from t
 
 None of this server's tools can make or remove that file. An assistant that also has a shell on your computer could, though, so it's the quickest brake rather than the last one.
 
+There's also a quicker way to stop just the session you're in. Type `/mcp__proton-mail__stop` in Claude Code and that session can't send again, previews included, until it ends. Like the file, it only stops sending, so reading, filing and drafting carry on. It's a command you run rather than a tool the assistant sees, so the assistant can't run it, and nothing it does through this server can undo it. To send again, start a new session.
+
+It's per session because most apps start a separate copy of the server for each session, and the stop lives in that copy. An app that runs one copy for all its chats would stop all of them, which is, at least, the safe way round.
+
+Support is patchy. I've tested it in Claude Code. VS Code, Gemini CLI, Zed, opencode and Cursor say they support MCP prompts, which is what this is, but I haven't tried them. Codex doesn't support prompts yet, and Claude Desktop reportedly won't attach them from a local server like this one. So the `STOP` file stays the brake that works everywhere, including a run you're not sat in front of.
+
 ### Attachments are files, not code
 
 Nothing is ever executed. Saved files are confined to the `attachments` directory, written owner-only and never executable, and they delete themselves after 15 minutes. One thing to be aware of though, files written this way don't carry the quarantine flag your browser or mail client would add, so your operating system won't warn you about them. Don't open executables that arrived by email.
