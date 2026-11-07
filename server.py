@@ -141,7 +141,7 @@ STOP_FILE = _cfg("PROTON_STOP_FILE") or os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "STOP")
 
 SERVER_NAME = "proton-mail"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.1.0"
 DEFAULT_PROTOCOL = "2025-06-18"
 
 
