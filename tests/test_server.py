@@ -6800,7 +6800,7 @@ class StopFile(unittest.TestCase):
 
 
 class StopSendingCommand(unittest.TestCase):
-    """The stop_sending prompt, which a person types as a slash command,
+    """The stop prompt, which a person types as a slash command,
     refuses every send for the rest of this server process. The model has no
     tool that reaches it."""
 
@@ -6851,20 +6851,20 @@ class StopSendingCommand(unittest.TestCase):
 
     def test_prompt_is_listed_with_tool_style_name(self):
         prompts = self._rpc("prompts/list")["result"]["prompts"]
-        self.assertEqual([p["name"] for p in prompts], ["stop_sending"])
+        self.assertEqual([p["name"] for p in prompts], ["stop"])
         self.assertTrue(prompts[0].get("description"))
 
     def test_running_it_refuses_the_next_send(self):
         self.assertFalse(self._call("send", self._send_args(dry_run=True))
                          .get("isError"))
-        got = self._rpc("prompts/get", {"name": "stop_sending"})["result"]
+        got = self._rpc("prompts/get", {"name": "stop"})["result"]
         self.assertIn("stopped", got["messages"][0]["content"]["text"].lower())
         res = self._call("send", self._send_args(dry_run=True))
         self.assertTrue(res.get("isError"))
-        self.assertIn("stop_sending", res["content"][0]["text"])
+        self.assertIn("stop command", res["content"][0]["text"])
 
     def test_refused_before_connecting(self):
-        self._rpc("prompts/get", {"name": "stop_sending"})
+        self._rpc("prompts/get", {"name": "stop"})
         msg = EmailMessage()
         msg["From"] = "owner@example.test"
         msg["To"] = "friend@example.test"
@@ -6880,7 +6880,7 @@ class StopSendingCommand(unittest.TestCase):
         creds.assert_not_called()
 
     def test_refused_send_uses_no_rate_limit_slot(self):
-        self._rpc("prompts/get", {"name": "stop_sending"})
+        self._rpc("prompts/get", {"name": "stop"})
         res = self._call("send", self._send_args(confirmed=True))
         self.assertTrue(res.get("isError"))
         rate = (server._read_state().get("rate") or {}).get("send", [])
@@ -6889,8 +6889,8 @@ class StopSendingCommand(unittest.TestCase):
     def test_no_tool_can_reach_it(self):
         # The model only sees tools. None of them may share the prompt's
         # name, and calling that name as a tool must not stop or resume.
-        self.assertNotIn("stop_sending", server.HANDLERS)
-        res = self._rpc("tools/call", {"name": "stop_sending",
+        self.assertNotIn("stop", server.HANDLERS)
+        res = self._rpc("tools/call", {"name": "stop",
                                        "arguments": {}})
         self.assertIn("error", res)
         self.assertFalse(server._SESSION_STOPPED)
@@ -6901,10 +6901,10 @@ class StopSendingCommand(unittest.TestCase):
         self.assertFalse(server._SESSION_STOPPED)
 
     def test_the_stop_is_written_to_the_audit_log(self):
-        self._rpc("prompts/get", {"name": "stop_sending"})
+        self._rpc("prompts/get", {"name": "stop"})
         with open(server.AUDIT_LOG) as f:
             records = [json.loads(line) for line in f]
-        self.assertEqual(records[-1]["tool"], "stop_sending")
+        self.assertEqual(records[-1]["tool"], "stop")
         self.assertEqual(records[-1]["outcome"], "ok")
 
 

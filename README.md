@@ -368,7 +368,7 @@ Put a file called `STOP` in the server's folder and every send is refused from t
 
 None of this server's tools can make or remove that file. An assistant that also has a shell on your computer could, though, so it's the quickest brake rather than the last one.
 
-There's also a quicker way to stop just the session you're in. Type `/mcp__proton-mail__stop_sending` in Claude Code and that session can't send again, previews included, until it ends. Like the file, it only stops sending, so reading, filing and drafting carry on. It's a command you run rather than a tool the assistant sees, so the assistant can't run it, and nothing it does through this server can undo it. To send again, start a new session.
+There's also a quicker way to stop just the session you're in. Type `/mcp__proton-mail__stop` in Claude Code and that session can't send again, previews included, until it ends. Like the file, it only stops sending, so reading, filing and drafting carry on. It's a command you run rather than a tool the assistant sees, so the assistant can't run it, and nothing it does through this server can undo it. To send again, start a new session.
 
 It's per session because most apps start a separate copy of the server for each session, and the stop lives in that copy. An app that runs one copy for all its chats would stop all of them, which is, at least, the safe way round.
 
