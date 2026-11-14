@@ -297,7 +297,7 @@ jobs:
           PY
 
       - id: review
-        uses: anthropics/claude-code-action@fd1c128679612beff4ca259c78021c506e8aa7a7 # v1.0.237
+        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}  # the reviewer posts with the job token, which reaches only this repo
@@ -352,7 +352,7 @@ jobs:
       - id: retry
         name: Review again, once, because the first pass posted nothing
         if: ${{ !cancelled() && steps.first.outputs.n == '0' }}
-        uses: anthropics/claude-code-action@fd1c128679612beff4ca259c78021c506e8aa7a7 # v1.0.237
+        uses: anthropics/claude-code-action@4fa93a88de49bbef68b10eb15aabedf28ca0e1ed # v1.0.271
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ github.token }}  # the reviewer posts with the job token, which reaches only this repo
