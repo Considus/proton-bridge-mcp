@@ -5,6 +5,9 @@ updates:
   # keep those current (and their commit-SHA pins refreshed) here.
   - package-ecosystem: "github-actions"
     directory: "/"
+    ignore:
+      # The review workflow pins this action by commit. A bump arrives only through a reviewed update.
+      - dependency-name: "anthropics/claude-code-action"
     schedule:
       interval: "weekly"
     commit-message:
