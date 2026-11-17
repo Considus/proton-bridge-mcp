@@ -2572,13 +2572,6 @@ def tool_forward(args):
 
 
 # ----------------------------------------------------------------------------
-# Attachments
-#
-# Most "file parts" in real mail are NOT documents: newsletters embed inline
-# cid: images (logo.png, facebook.png...) and Proton auto-attaches PGP public
-# keys. Classify so `documents` stays signal, not noise.
-# ----------------------------------------------------------------------------
-# ----------------------------------------------------------------------------
 # Provenance tracking — ENFORCED anti-exfiltration.
 #
 # `confirmed=true` is a speed bump: a fully prompt-injected model could set it.
@@ -2926,6 +2919,9 @@ def _resolve_dest(dest_dir):
     return target
 
 
+# Most file parts in real mail are not documents: newsletters embed inline
+# cid: images and Proton auto-attaches PGP public keys. Classifying keeps the
+# "document" list free of them.
 def _classify_part(part):
     """-> 'document' | 'inline' | 'pgp' | None (None = body/structural part)."""
     ctype = part.get_content_type()
